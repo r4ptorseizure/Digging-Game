@@ -2,6 +2,7 @@
 --// Full Auto Farm + Auto Collect + Auto Shake + Auto Sell
 --// Pan detection every 20 seconds
 --// Location system with Level 1 + Level 2 + Level 3
+--// Collision-aware tween movement
 
 --==================================================
 -- SERVICES
@@ -11,6 +12,8 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
 local LocalPlayer = Players.LocalPlayer
 
 --==================================================
@@ -21,6 +24,19 @@ local PAN_SCAN_INTERVAL = 20
 local AUTO_COLLECT_DELAY = 0.1
 local AUTO_SELL_DELAY = 1
 
+-- Movement settings
+local TWEEN_SPEED = 45
+local MIN_TWEEN_DURATION = 0.5
+
+-- How far above the detected floor the root should stay
+local GROUND_CLEARANCE = 3
+
+-- Size of each movement segment
+local TWEEN_SEGMENT_DISTANCE = 8
+
+-- How far downward the floor raycast checks
+local GROUND_RAY_DISTANCE = 50
+
 --==================================================
 -- LOCATIONS
 --==================================================
@@ -28,11 +44,13 @@ local AUTO_SELL_DELAY = 1
 local LOCATIONS = {
     {
         Name = "Level 1 - Basic",
+
         Sand = Vector3.new(
             -67.27998352050781,
             10.669769287109375,
             49.29251480102539
         ),
+
         Water = Vector3.new(
             -91.01200866699219,
             9,
@@ -42,11 +60,13 @@ local LOCATIONS = {
 
     {
         Name = "Level 2",
+
         Sand = Vector3.new(
             -133.70,
             13.00,
             35.17
         ),
+
         Water = Vector3.new(
             -97.41,
             9.00,
@@ -56,11 +76,13 @@ local LOCATIONS = {
 
     {
         Name = "Level 3",
+
         Sand = Vector3.new(
             -349.25,
             12.79,
             140.06
         ),
+
         Water = Vector3.new(
             -388.55,
             9.00,
@@ -288,6 +310,7 @@ HomeLocationStatus.Parent = HomeContent
 --==================================================
 
 local function CreateButton(Name, Text, Position)
+
     local Button = Instance.new("TextButton")
 
     Button.Name = Name
@@ -403,9 +426,11 @@ LocationPopupStatus.Parent = LocationPopup
 local LocationButtons = {}
 
 local function CreateLocationButton(Index, Position)
+
     local Location = LOCATIONS[Index]
 
     local Button = Instance.new("TextButton")
+
     Button.Name = "Location" .. Index
     Button.Size = UDim2.new(1, -30, 0, 45)
     Button.Position = Position
@@ -452,6 +477,7 @@ CreateLocationButton(
 --==================================================
 
 local function UpdateLocationDisplay()
+
     local Location = LOCATIONS[SelectedLocation]
 
     if not Location then
@@ -468,23 +494,29 @@ local function UpdateLocationDisplay()
         "Locations: " .. Location.Name
 
     for Index, Button in pairs(LocationButtons) do
+
         if Index == SelectedLocation then
+
             Button.BackgroundColor3 =
                 Color3.fromRGB(70, 130, 80)
 
             Button.TextColor3 =
                 Color3.fromRGB(255, 255, 255)
+
         else
+
             Button.BackgroundColor3 =
                 Color3.fromRGB(35, 35, 40)
 
             Button.TextColor3 =
                 Color3.fromRGB(230, 230, 235)
+
         end
     end
 end
 
 local function SelectLocation(Index)
+
     if not LOCATIONS[Index] then
         return
     end
@@ -514,8 +546,10 @@ LocationButtons[3].MouseButton1Click:Connect(function()
 end)
 
 LocationsButton.MouseButton1Click:Connect(function()
+
     LocationPopup.Visible =
         not LocationPopup.Visible
+
 end)
 
 UpdateLocationDisplay()
@@ -525,11 +559,14 @@ UpdateLocationDisplay()
 --==================================================
 
 HomeButton.MouseButton1Click:Connect(function()
+
     HomeContent.Visible = true
+
     HomeButton.BackgroundColor3 =
         Color3.fromRGB(40, 40, 46)
 
     LocationPopup.Visible = false
+
 end)
 
 --==================================================
@@ -541,24 +578,31 @@ local DragStart = nil
 local StartPosition = nil
 
 TitleBar.InputBegan:Connect(function(Input)
+
     if Input.UserInputType ==
         Enum.UserInputType.MouseButton1
     then
+
         Dragging = true
         DragStart = Input.Position
         StartPosition = Main.Position
+
     end
 end)
 
 TitleBar.InputEnded:Connect(function(Input)
+
     if Input.UserInputType ==
         Enum.UserInputType.MouseButton1
     then
+
         Dragging = false
+
     end
 end)
 
 UserInputService.InputChanged:Connect(function(Input)
+
     if not Dragging then
         return
     end
@@ -566,6 +610,7 @@ UserInputService.InputChanged:Connect(function(Input)
     if Input.UserInputType ==
         Enum.UserInputType.MouseMovement
     then
+
         local Delta =
             Input.Position - DragStart
 
@@ -575,6 +620,7 @@ UserInputService.InputChanged:Connect(function(Input)
             StartPosition.Y.Scale,
             StartPosition.Y.Offset + Delta.Y
         )
+
     end
 end)
 
@@ -583,6 +629,7 @@ end)
 --==================================================
 
 local function ScanForPan()
+
     if not ScriptRunning then
         return
     end
@@ -591,6 +638,7 @@ local function ScanForPan()
         LocalPlayer.Character
 
     if not Character then
+
         CurrentPan = nil
         CurrentCollect = nil
         CurrentShake = nil
@@ -661,6 +709,7 @@ local function ScanForPan()
     CurrentPanRemote = FoundPanRemote
 
     if CurrentPan then
+
         PanStatus.Text =
             "Pan: " .. CurrentPan.Name
 
@@ -670,7 +719,9 @@ local function ScanForPan()
                 180,
                 185
             )
+
     else
+
         PanStatus.Text =
             "Pan: None equipped"
 
@@ -680,6 +731,7 @@ local function ScanForPan()
                 100,
                 100
             )
+
     end
 end
 
@@ -688,11 +740,15 @@ end
 --==================================================
 
 local function GetSand()
+
     local Pan = CurrentPan
 
     if not Pan or not Pan.Parent then
+
         ScanForPan()
+
         Pan = CurrentPan
+
     end
 
     if not Pan then
@@ -716,6 +772,7 @@ local function GetSand()
 end
 
 local function UpdateSandDisplay()
+
     if not ScriptRunning then
         return
     end
@@ -728,6 +785,7 @@ local function UpdateSandDisplay()
         .. tostring(math.floor(Fill))
         .. " / "
         .. tostring(math.floor(Capacity))
+
 end
 
 --==================================================
@@ -735,6 +793,7 @@ end
 --==================================================
 
 local function Collect()
+
     if not ScriptRunning then
         return
     end
@@ -742,13 +801,17 @@ local function Collect()
     if not CurrentPan
         or not CurrentPan.Parent
     then
+
         ScanForPan()
+
     end
 
     if not CurrentCollect then
+
         warn(
             "[Collect] Collect RemoteFunction not found."
         )
+
         return
     end
 
@@ -759,16 +822,20 @@ local function Collect()
 
     local Success, Error =
         pcall(function()
+
             CurrentCollect:InvokeServer(
                 unpack(Args)
             )
+
         end)
 
     if not Success then
+
         warn(
             "[Collect] Error:",
             Error
         )
+
     end
 end
 
@@ -777,6 +844,7 @@ end
 --==================================================
 
 local function ShakePan()
+
     if not ScriptRunning then
         return
     end
@@ -784,18 +852,24 @@ local function ShakePan()
     if not CurrentPan
         or not CurrentPan.Parent
     then
+
         ScanForPan()
+
     end
 
     if not CurrentShake then
+
         warn(
             "[Shake] Shake RemoteEvent not found."
         )
+
         return
     end
 
     pcall(function()
+
         CurrentShake:FireServer()
+
     end)
 end
 
@@ -804,6 +878,7 @@ end
 --==================================================
 
 local function StartWaterPan()
+
     if not ScriptRunning then
         return false
     end
@@ -811,9 +886,11 @@ local function StartWaterPan()
     ScanForPan()
 
     if not CurrentPan then
+
         warn(
             "[Pan] No equipped pan."
         )
+
         return false
     end
 
@@ -821,9 +898,11 @@ local function StartWaterPan()
         CurrentPan:FindFirstChild("Scripts")
 
     if not Scripts then
+
         warn(
             "[Pan] Scripts folder missing."
         )
+
         return false
     end
 
@@ -831,17 +910,21 @@ local function StartWaterPan()
         Scripts:FindFirstChild("Pan")
 
     if not PanRemote then
+
         warn(
             "[Pan] Pan RemoteFunction missing."
         )
+
         return false
     end
 
     if not PanRemote:IsA("RemoteFunction") then
+
         warn(
             "[Pan] Pan is "
             .. PanRemote.ClassName
         )
+
         return false
     end
 
@@ -860,14 +943,18 @@ local function StartWaterPan()
 
     local Success, Result =
         pcall(function()
+
             return PanRemote:InvokeServer()
+
         end)
 
     if not Success then
+
         warn(
             "[Pan] Pan InvokeServer error:",
             Result
         )
+
         return false
     end
 
@@ -877,9 +964,11 @@ local function StartWaterPan()
     )
 
     if Result ~= true then
+
         warn(
             "[Pan] Pan activation rejected."
         )
+
         return false
     end
 
@@ -891,6 +980,7 @@ local function StartWaterPan()
         and (AutoFarm or AutoShake)
         and os.clock() < Timeout
     do
+
         if Character:GetAttribute(
             "Panning"
         ) == true then
@@ -903,6 +993,7 @@ local function StartWaterPan()
         end
 
         task.wait(0.05)
+
     end
 
     warn(
@@ -918,6 +1009,7 @@ end
 --==================================================
 
 local function ShakeWhilePanning()
+
     if not ScriptRunning then
         return false
     end
@@ -932,9 +1024,11 @@ local function ShakeWhilePanning()
     ScanForPan()
 
     if not CurrentShake then
+
         warn(
             "[Shake] Shake RemoteEvent missing."
         )
+
         return false
     end
 
@@ -944,10 +1038,12 @@ local function ShakeWhilePanning()
     local ShakeSpeed = 2
 
     if Stats then
+
         ShakeSpeed =
             Stats:GetAttribute(
                 "ShakeSpeed"
             ) or 1
+
     end
 
     ShakeSpeed =
@@ -983,13 +1079,17 @@ local function ShakeWhilePanning()
             if not CurrentShake then
                 break
             end
+
         end
 
         pcall(function()
+
             CurrentShake:FireServer()
+
         end)
 
         task.wait(Cooldown)
+
     end
 
     return true
@@ -1019,6 +1119,7 @@ pcall(function()
 end)
 
 local function SellAll()
+
     if not ScriptRunning then
         return
     end
@@ -1069,15 +1170,18 @@ local function SellAll()
             end
 
         end)
+
     else
 
         warn(
             "[Sell] SellAll not found."
         )
+
     end
 end
 
 local function StartAutoSell()
+
     if AutoSellThread then
         return
     end
@@ -1095,17 +1199,253 @@ local function StartAutoSell()
                 task.wait(
                     AUTO_SELL_DELAY
                 )
+
             end
 
             AutoSellThread = nil
+
         end)
 end
 
 --==================================================
--- TWEEN
+-- COLLISION-AWARE TWEEN HELPERS
+--==================================================
+
+local function GetGroundY(Position, Character)
+
+    local RayParams =
+        RaycastParams.new()
+
+    RayParams.FilterType =
+        Enum.RaycastFilterType.Exclude
+
+    RayParams.FilterDescendantsInstances = {
+        Character
+    }
+
+    RayParams.IgnoreWater = false
+
+    local Origin =
+        Position + Vector3.new(
+            0,
+            5,
+            0
+        )
+
+    local Direction =
+        Vector3.new(
+            0,
+            -GROUND_RAY_DISTANCE,
+            0
+        )
+
+    local Result =
+        Workspace:Raycast(
+            Origin,
+            Direction,
+            RayParams
+        )
+
+    if Result then
+
+        return Result.Position.Y
+
+    end
+
+    return nil
+end
+
+local function GetSafeHeight(Position, Character)
+
+    local GroundY =
+        GetGroundY(
+            Position,
+            Character
+        )
+
+    if not GroundY then
+
+        return Position.Y
+
+    end
+
+    local Humanoid =
+        Character:FindFirstChildOfClass(
+            "Humanoid"
+        )
+
+    local RootPart =
+        Character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    local Height =
+        GROUND_CLEARANCE
+
+    if Humanoid and RootPart then
+
+        Height =
+            math.max(
+                GROUND_CLEARANCE,
+                Humanoid.HipHeight
+                    + RootPart.Size.Y / 2
+            )
+
+    end
+
+    local MinimumY =
+        GroundY + Height
+
+    return math.max(
+        Position.Y,
+        MinimumY
+    )
+end
+
+local function TweenSegment(
+    RootPart,
+    TargetPosition,
+    Character
+)
+
+    if not ScriptRunning then
+        return false
+    end
+
+    local StartPosition =
+        RootPart.Position
+
+    local Distance =
+        (
+            StartPosition
+            - TargetPosition
+        ).Magnitude
+
+    if Distance <= 0.05 then
+        return true
+    end
+
+    local Duration =
+        math.max(
+            Distance / TWEEN_SPEED,
+            0.05
+        )
+
+    local Tween =
+        TweenService:Create(
+            RootPart,
+
+            TweenInfo.new(
+                Duration,
+                Enum.EasingStyle.Linear
+            ),
+
+            {
+                CFrame =
+                    CFrame.new(
+                        TargetPosition
+                    )
+            }
+        )
+
+    local Finished = false
+    local Connection = nil
+
+    Connection =
+        Tween.Completed:Connect(
+            function()
+
+                Finished = true
+
+                if Connection then
+                    Connection:Disconnect()
+                    Connection = nil
+                end
+
+            end
+        )
+
+    Tween:Play()
+
+    while
+        ScriptRunning
+        and not Finished
+    do
+
+        -- Check the ground underneath
+        -- the character while moving.
+
+        local CurrentPosition =
+            RootPart.Position
+
+        local GroundY =
+            GetGroundY(
+                CurrentPosition,
+                Character
+            )
+
+        if GroundY then
+
+            local Humanoid =
+                Character:FindFirstChildOfClass(
+                    "Humanoid"
+                )
+
+            local MinimumHeight =
+                GROUND_CLEARANCE
+
+            if Humanoid then
+
+                MinimumHeight =
+                    math.max(
+                        GROUND_CLEARANCE,
+                        Humanoid.HipHeight
+                            + RootPart.Size.Y / 2
+                    )
+
+            end
+
+            local MinimumY =
+                GroundY + MinimumHeight
+
+            if CurrentPosition.Y < MinimumY then
+
+                Tween:Cancel()
+
+                RootPart.CFrame =
+                    CFrame.new(
+                        CurrentPosition.X,
+                        MinimumY,
+                        CurrentPosition.Z
+                    )
+
+                if Connection then
+                    Connection:Disconnect()
+                    Connection = nil
+                end
+
+                return false
+            end
+        end
+
+        task.wait()
+
+    end
+
+    if Connection then
+        Connection:Disconnect()
+        Connection = nil
+    end
+
+    return ScriptRunning
+end
+
+--==================================================
+-- COLLISION-AWARE TWEEN
 --==================================================
 
 local function TweenTo(Position)
+
     if not ScriptRunning then
         return false
     end
@@ -1126,54 +1466,229 @@ local function TweenTo(Position)
         return false
     end
 
-    local Distance =
+    --==================================================
+    -- BUILD A SAFE ROUTE
+    --==================================================
+
+    local StartPosition =
+        RootPart.Position
+
+    local HorizontalStart =
+        Vector3.new(
+            StartPosition.X,
+            0,
+            StartPosition.Z
+        )
+
+    local HorizontalTarget =
+        Vector3.new(
+            Position.X,
+            0,
+            Position.Z
+        )
+
+    local HorizontalDistance =
         (
-            RootPart.Position
-            - Position
+            HorizontalStart
+            - HorizontalTarget
         ).Magnitude
 
-    local Duration =
+    local SegmentCount =
         math.max(
-            Distance / 45,
-            0.5
+            1,
+            math.ceil(
+                HorizontalDistance
+                / TWEEN_SEGMENT_DISTANCE
+            )
         )
 
-    local Tween =
-        TweenService:Create(
+    local Waypoints = {}
+
+    -- Find the highest safe floor height
+    -- along the route so we don't dip
+    -- through terrain during the tween.
+
+    local RouteHeight =
+        StartPosition.Y
+
+    for Index = 1, SegmentCount do
+
+        local Alpha =
+            Index / SegmentCount
+
+        local X =
+            StartPosition.X
+            + (
+                Position.X
+                - StartPosition.X
+            ) * Alpha
+
+        local Z =
+            StartPosition.Z
+            + (
+                Position.Z
+                - StartPosition.Z
+            ) * Alpha
+
+        local SamplePosition =
+            Vector3.new(
+                X,
+                Position.Y,
+                Z
+            )
+
+        local SafeY =
+            GetSafeHeight(
+                SamplePosition,
+                Character
+            )
+
+        RouteHeight =
+            math.max(
+                RouteHeight,
+                SafeY
+            )
+
+    end
+
+    --==================================================
+    -- MOVE UP FIRST
+    --==================================================
+
+    local SafeTravelHeight =
+        math.max(
+            RouteHeight,
+            GetSafeHeight(
+                Vector3.new(
+                    StartPosition.X,
+                    Position.Y,
+                    StartPosition.Z
+                ),
+                Character
+            )
+        )
+
+    if StartPosition.Y < SafeTravelHeight - 0.1 then
+
+        local RaisedPosition =
+            Vector3.new(
+                StartPosition.X,
+                SafeTravelHeight,
+                StartPosition.Z
+            )
+
+        if not TweenSegment(
             RootPart,
+            RaisedPosition,
+            Character
+        ) then
 
-            TweenInfo.new(
-                Duration,
-                Enum.EasingStyle.Linear
-            ),
+            return false
+        end
+    end
 
-            {
-                CFrame =
-                    CFrame.new(Position)
-            }
+    --==================================================
+    -- HORIZONTAL MOVEMENT
+    --==================================================
+
+    local CurrentPosition =
+        RootPart.Position
+
+    for Index = 1, SegmentCount do
+
+        if not ScriptRunning then
+            return false
+        end
+
+        local Alpha =
+            Index / SegmentCount
+
+        local X =
+            StartPosition.X
+            + (
+                Position.X
+                - StartPosition.X
+            ) * Alpha
+
+        local Z =
+            StartPosition.Z
+            + (
+                Position.Z
+                - StartPosition.Z
+            ) * Alpha
+
+        local SegmentPosition =
+            Vector3.new(
+                X,
+                SafeTravelHeight,
+                Z
+            )
+
+        -- Keep the movement at or above
+        -- the detected floor.
+
+        local SafeY =
+            GetSafeHeight(
+                SegmentPosition,
+                Character
+            )
+
+        SegmentPosition =
+            Vector3.new(
+                X,
+                math.max(
+                    SafeTravelHeight,
+                    SafeY
+                ),
+                Z
+            )
+
+        if not TweenSegment(
+            RootPart,
+            SegmentPosition,
+            Character
+        ) then
+
+            return false
+        end
+
+        CurrentPosition =
+            RootPart.Position
+    end
+
+    --==================================================
+    -- FINAL DESCENT
+    --==================================================
+
+    local FinalSafeY =
+        GetSafeHeight(
+            Position,
+            Character
         )
 
-    local Finished = false
-    local Connection
+    -- Don't force the character below
+    -- the detected floor.
 
-    Connection =
-        Tween.Completed:Connect(
-            function()
-                Finished = true
-
-                if Connection then
-                    Connection:Disconnect()
-                end
-            end
+    local FinalY =
+        math.max(
+            Position.Y,
+            FinalSafeY
         )
 
-    Tween:Play()
+    local FinalPosition =
+        Vector3.new(
+            Position.X,
+            FinalY,
+            Position.Z
+        )
 
-    while
-        ScriptRunning
-        and not Finished
-    do
-        task.wait()
+    if not TweenSegment(
+        RootPart,
+        FinalPosition,
+        Character
+    ) then
+
+        return false
     end
 
     return ScriptRunning
@@ -1201,7 +1716,9 @@ local function RunAutoFarm()
                 UpdateSandDisplay()
 
                 if not CurrentPan then
+
                     task.wait(1)
+
                     continue
                 end
 
@@ -1216,11 +1733,13 @@ local function RunAutoFarm()
                 )
 
                 if Capacity <= 0 then
+
                     print(
                         "[AutoFarm] Capacity not detected."
                     )
 
                     task.wait(0.5)
+
                     continue
                 end
 
@@ -1232,11 +1751,13 @@ local function RunAutoFarm()
                     LOCATIONS[SelectedLocation]
 
                 if not Location then
+
                     warn(
                         "[AutoFarm] Selected location missing."
                     )
 
                     task.wait(1)
+
                     continue
                 end
 
@@ -1265,12 +1786,14 @@ local function RunAutoFarm()
                     if not TweenTo(
                         SandPosition
                     ) then
+
                         break
                     end
 
                     if not AutoFarm
                         or not ScriptRunning
                     then
+
                         break
                     end
 
@@ -1292,13 +1815,16 @@ local function RunAutoFarm()
                         end
 
                         if CurrentCapacity <= 0 then
+
                             task.wait(0.5)
+
                             continue
                         end
 
                         if CurrentFill >=
                             CurrentCapacity
                         then
+
                             break
                         end
 
@@ -1313,6 +1839,7 @@ local function RunAutoFarm()
                 if not AutoFarm
                     or not ScriptRunning
                 then
+
                     break
                 end
 
@@ -1325,17 +1852,23 @@ local function RunAutoFarm()
                 UpdateSandDisplay()
 
                 if not CurrentPan then
+
                     task.wait(0.5)
+
                     continue
                 end
 
                 if FinalCapacity <= 0 then
+
                     task.wait(0.5)
+
                     continue
                 end
 
                 if FinalFill < FinalCapacity then
+
                     task.wait(0.2)
+
                     continue
                 end
 
@@ -1351,12 +1884,14 @@ local function RunAutoFarm()
                 if not TweenTo(
                     WaterPosition
                 ) then
+
                     break
                 end
 
                 if not AutoFarm
                     or not ScriptRunning
                 then
+
                     break
                 end
 
@@ -1376,10 +1911,12 @@ local function RunAutoFarm()
                     )
 
                     task.wait(1)
+
                     continue
                 end
 
                 -- SAME SHAKE MECHANIC
+
                 ShakeWhilePanning()
 
                 --==================================================
@@ -1434,12 +1971,15 @@ local function RunAutoFarm()
                     end
 
                     task.wait(0.1)
+
                 end
 
                 task.wait(0.25)
+
             end
 
             AutoFarmThread = nil
+
         end)
 end
 
@@ -1467,9 +2007,11 @@ local function StartAutoCollect()
                 task.wait(
                     AUTO_COLLECT_DELAY
                 )
+
             end
 
             AutoCollectThread = nil
+
         end)
 end
 
@@ -1495,7 +2037,9 @@ local function StartAutoShake()
                     LocalPlayer.Character
 
                 if not Character then
+
                     task.wait(0.25)
+
                     continue
                 end
 
@@ -1510,7 +2054,9 @@ local function StartAutoShake()
                     ScanForPan()
 
                     if not CurrentPan then
+
                         task.wait(0.5)
+
                         continue
                     end
 
@@ -1522,21 +2068,25 @@ local function StartAutoShake()
                         StartWaterPan()
 
                     if not Started then
+
                         task.wait(0.5)
+
                         continue
                     end
                 end
 
                 --==============================================
-                -- USE THE EXACT SAME SHAKE MECHANIC AS AUTOFARM
+                -- SAME SHAKE MECHANIC AS AUTOFARM
                 --==============================================
 
                 ShakeWhilePanning()
 
                 task.wait(0.05)
+
             end
 
             AutoShakeThread = nil
+
         end)
 end
 
@@ -1584,6 +2134,7 @@ AutoCollectButton.MouseButton1Click:Connect(
                     35,
                     40
                 )
+
         end
     end
 )
@@ -1623,6 +2174,7 @@ AutoShakeButton.MouseButton1Click:Connect(
                     35,
                     40
                 )
+
         end
     end
 )
@@ -1662,6 +2214,7 @@ AutoSellButton.MouseButton1Click:Connect(
                     35,
                     40
                 )
+
         end
     end
 )
@@ -1701,6 +2254,7 @@ AutoFarmButton.MouseButton1Click:Connect(
                     35,
                     40
                 )
+
         end
     end
 )
@@ -1756,6 +2310,7 @@ SearchBox:GetPropertyChangedSignal(
                 1,
                 true
             ) ~= nil
+
     end
 end)
 
@@ -1775,6 +2330,7 @@ Connections.CharacterAdded =
 
             ScanForPan()
             UpdateSandDisplay()
+
         end
     )
 
@@ -1804,9 +2360,11 @@ task.spawn(function()
             UpdateSandDisplay()
 
             task.wait(1)
+
         end
 
         ScanForPan()
+
     end
 end)
 
@@ -1837,6 +2395,7 @@ Connections.InputBegan =
                 if not Main.Visible then
                     LocationPopup.Visible = false
                 end
+
             end
         end
     )
@@ -1865,6 +2424,7 @@ local function Shutdown()
         pcall(function()
             Connection:Disconnect()
         end)
+
     end
 
     Connections = {}
