@@ -1,0 +1,1896 @@
+--// Charles's Auto Tool
+--// Full Auto Farm + Auto Collect + Auto Shake + Auto Sell
+--// Pan detection every 20 seconds
+--// Location system with Level 1 + Level 2 + Level 3
+
+--==================================================
+-- SERVICES
+--==================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+--==================================================
+-- SETTINGS
+--==================================================
+
+local PAN_SCAN_INTERVAL = 20
+local AUTO_COLLECT_DELAY = 0.1
+local AUTO_SELL_DELAY = 1
+
+--==================================================
+-- LOCATIONS
+--==================================================
+
+local LOCATIONS = {
+    {
+        Name = "Level 1 - Basic",
+        Sand = Vector3.new(
+            -67.27998352050781,
+            10.669769287109375,
+            49.29251480102539
+        ),
+        Water = Vector3.new(
+            -91.01200866699219,
+            9,
+            8.135207176208496
+        )
+    },
+
+    {
+        Name = "Level 2",
+        Sand = Vector3.new(
+            -133.70,
+            13.00,
+            35.17
+        ),
+        Water = Vector3.new(
+            -97.41,
+            9.00,
+            42.51
+        )
+    },
+
+    {
+        Name = "Level 3",
+        Sand = Vector3.new(
+            -349.25,
+            12.79,
+            140.06
+        ),
+        Water = Vector3.new(
+            -388.55,
+            9.00,
+            118.30
+        )
+    }
+}
+
+local SelectedLocation = 1
+
+--==================================================
+-- STATE
+--==================================================
+
+local ScriptRunning = true
+
+local AutoCollect = false
+local AutoShake = false
+local AutoSell = false
+local AutoFarm = false
+
+local CurrentPan = nil
+local CurrentCollect = nil
+local CurrentShake = nil
+local CurrentPanRemote = nil
+
+local AutoFarmThread = nil
+local AutoCollectThread = nil
+local AutoShakeThread = nil
+local AutoSellThread = nil
+
+local Connections = {}
+
+--==================================================
+-- GUI
+--==================================================
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "CharlesAutoTool"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = game:GetService("CoreGui")
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.new(0, 570, 0, 365)
+Main.Position = UDim2.new(0.5, -285, 0.5, -182)
+Main.BackgroundColor3 = Color3.fromRGB(20, 20, 23)
+Main.BorderSizePixel = 0
+Main.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 8)
+MainCorner.Parent = Main
+
+--==================================================
+-- TITLE
+--==================================================
+
+local TitleBar = Instance.new("Frame")
+TitleBar.Size = UDim2.new(1, 0, 0, 42)
+TitleBar.BackgroundColor3 = Color3.fromRGB(25, 25, 29)
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = Main
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 15, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Charles's Auto Tool"
+Title.TextColor3 = Color3.fromRGB(235, 235, 240)
+Title.TextSize = 16
+Title.Font = Enum.Font.GothamSemibold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = TitleBar
+
+--==================================================
+-- CLOSE
+--==================================================
+
+local CloseButton = Instance.new("ImageButton")
+CloseButton.Size = UDim2.new(0, 28, 0, 28)
+CloseButton.Position = UDim2.new(1, -34, 0, 7)
+CloseButton.BackgroundTransparency = 1
+CloseButton.Image = "rbxassetid://7072725342"
+CloseButton.ImageColor3 = Color3.fromRGB(255, 255, 255)
+CloseButton.Parent = Main
+
+--==================================================
+-- SIDEBAR
+--==================================================
+
+local Sidebar = Instance.new("Frame")
+Sidebar.Size = UDim2.new(0, 130, 1, -42)
+Sidebar.Position = UDim2.new(0, 0, 0, 42)
+Sidebar.BackgroundColor3 = Color3.fromRGB(23, 23, 27)
+Sidebar.BorderSizePixel = 0
+Sidebar.Parent = Main
+
+--==================================================
+-- HOME TAB
+--==================================================
+
+local HomeButton = Instance.new("TextButton")
+HomeButton.Size = UDim2.new(1, -20, 0, 38)
+HomeButton.Position = UDim2.new(0, 10, 0, 12)
+HomeButton.BackgroundColor3 = Color3.fromRGB(40, 40, 46)
+HomeButton.BorderSizePixel = 0
+HomeButton.Text = "Home"
+HomeButton.TextColor3 = Color3.fromRGB(235, 235, 240)
+HomeButton.TextSize = 13
+HomeButton.Font = Enum.Font.GothamMedium
+HomeButton.Parent = Sidebar
+
+local HomeCorner = Instance.new("UICorner")
+HomeCorner.CornerRadius = UDim.new(0, 5)
+HomeCorner.Parent = HomeButton
+
+--==================================================
+-- LOCATIONS BUTTON
+--==================================================
+
+local LocationsButton = Instance.new("TextButton")
+LocationsButton.Size = UDim2.new(1, -20, 0, 38)
+LocationsButton.Position = UDim2.new(0, 10, 0, 58)
+LocationsButton.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+LocationsButton.BorderSizePixel = 0
+LocationsButton.Text = "Locations"
+LocationsButton.TextColor3 = Color3.fromRGB(200, 200, 205)
+LocationsButton.TextSize = 13
+LocationsButton.Font = Enum.Font.GothamMedium
+LocationsButton.Parent = Sidebar
+
+local LocationsCorner = Instance.new("UICorner")
+LocationsCorner.CornerRadius = UDim.new(0, 5)
+LocationsCorner.Parent = LocationsButton
+
+--==================================================
+-- HOME CONTENT
+--==================================================
+
+local HomeContent = Instance.new("Frame")
+HomeContent.Size = UDim2.new(1, -130, 1, -42)
+HomeContent.Position = UDim2.new(0, 130, 0, 42)
+HomeContent.BackgroundColor3 = Color3.fromRGB(20, 20, 23)
+HomeContent.BorderSizePixel = 0
+HomeContent.Parent = Main
+
+--==================================================
+-- SEARCH
+--==================================================
+
+local SearchBox = Instance.new("TextBox")
+SearchBox.Size = UDim2.new(1, -30, 0, 34)
+SearchBox.Position = UDim2.new(0, 15, 0, 12)
+SearchBox.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+SearchBox.BorderSizePixel = 0
+SearchBox.PlaceholderText = "Search..."
+SearchBox.PlaceholderColor3 = Color3.fromRGB(120, 120, 125)
+SearchBox.Text = ""
+SearchBox.TextColor3 = Color3.fromRGB(230, 230, 235)
+SearchBox.TextSize = 13
+SearchBox.Font = Enum.Font.Gotham
+SearchBox.ClearTextOnFocus = false
+SearchBox.Parent = HomeContent
+
+local SearchCorner = Instance.new("UICorner")
+SearchCorner.CornerRadius = UDim.new(0, 5)
+SearchCorner.Parent = SearchBox
+
+--==================================================
+-- STATUS
+--==================================================
+
+local PanStatus = Instance.new("TextLabel")
+PanStatus.Size = UDim2.new(1, -30, 0, 25)
+PanStatus.Position = UDim2.new(0, 15, 0, 58)
+PanStatus.BackgroundTransparency = 1
+PanStatus.Text = "Pan: Scanning..."
+PanStatus.TextColor3 = Color3.fromRGB(180, 180, 185)
+PanStatus.TextSize = 13
+PanStatus.Font = Enum.Font.Gotham
+PanStatus.TextXAlignment = Enum.TextXAlignment.Left
+PanStatus.Parent = HomeContent
+
+local ScanStatus = Instance.new("TextLabel")
+ScanStatus.Size = UDim2.new(1, -30, 0, 20)
+ScanStatus.Position = UDim2.new(0, 15, 0, 80)
+ScanStatus.BackgroundTransparency = 1
+ScanStatus.Text = "Next scan: --"
+ScanStatus.TextColor3 = Color3.fromRGB(120, 120, 125)
+ScanStatus.TextSize = 11
+ScanStatus.Font = Enum.Font.Gotham
+ScanStatus.TextXAlignment = Enum.TextXAlignment.Left
+ScanStatus.Parent = HomeContent
+
+local SandStatus = Instance.new("TextLabel")
+SandStatus.Size = UDim2.new(1, -30, 0, 24)
+SandStatus.Position = UDim2.new(0, 15, 0, 104)
+SandStatus.BackgroundTransparency = 1
+SandStatus.Text = "Sand: 0 / 0"
+SandStatus.TextColor3 = Color3.fromRGB(180, 180, 185)
+SandStatus.TextSize = 12
+SandStatus.Font = Enum.Font.Gotham
+SandStatus.TextXAlignment = Enum.TextXAlignment.Left
+SandStatus.Parent = HomeContent
+
+--==================================================
+-- SELECTED LOCATION STATUS
+--==================================================
+
+local HomeLocationStatus = Instance.new("TextLabel")
+HomeLocationStatus.Size = UDim2.new(1, -30, 0, 20)
+HomeLocationStatus.Position = UDim2.new(0, 15, 0, 124)
+HomeLocationStatus.BackgroundTransparency = 1
+HomeLocationStatus.Text = "Location: Level 1 - Basic"
+HomeLocationStatus.TextColor3 = Color3.fromRGB(150, 150, 155)
+HomeLocationStatus.TextSize = 11
+HomeLocationStatus.Font = Enum.Font.Gotham
+HomeLocationStatus.TextXAlignment = Enum.TextXAlignment.Left
+HomeLocationStatus.Parent = HomeContent
+
+--==================================================
+-- BUTTON CREATOR
+--==================================================
+
+local function CreateButton(Name, Text, Position)
+    local Button = Instance.new("TextButton")
+
+    Button.Name = Name
+    Button.Size = UDim2.new(0, 190, 0, 42)
+    Button.Position = Position
+    Button.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    Button.BorderSizePixel = 0
+    Button.Text = Text
+    Button.TextColor3 = Color3.fromRGB(230, 230, 235)
+    Button.TextSize = 12
+    Button.Font = Enum.Font.GothamMedium
+    Button.Parent = HomeContent
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 5)
+    Corner.Parent = Button
+
+    return Button
+end
+
+--==================================================
+-- HOME BUTTONS
+--==================================================
+
+local CollectButton = CreateButton(
+    "CollectButton",
+    "Collect",
+    UDim2.new(0, 15, 0, 150)
+)
+
+local AutoCollectButton = CreateButton(
+    "AutoCollectButton",
+    "Auto Collect: OFF",
+    UDim2.new(0, 215, 0, 150)
+)
+
+local AutoShakeButton = CreateButton(
+    "AutoShakeButton",
+    "Auto Shake: OFF",
+    UDim2.new(0, 15, 0, 200)
+)
+
+local AutoSellButton = CreateButton(
+    "AutoSellButton",
+    "Auto Sell: OFF",
+    UDim2.new(0, 215, 0, 200)
+)
+
+local AutoFarmButton = CreateButton(
+    "AutoFarmButton",
+    "Auto Farm: OFF",
+    UDim2.new(0, 15, 0, 250)
+)
+
+local Feature3Button = CreateButton(
+    "Feature3Button",
+    "Feature 3",
+    UDim2.new(0, 215, 0, 250)
+)
+
+local Feature4Button = CreateButton(
+    "Feature4Button",
+    "Feature 4",
+    UDim2.new(0, 15, 0, 300)
+)
+
+--==================================================
+-- LOCATION POPUP
+--==================================================
+
+local LocationPopup = Instance.new("Frame")
+LocationPopup.Name = "LocationPopup"
+LocationPopup.Size = UDim2.new(0, 390, 0, 235)
+LocationPopup.Position = UDim2.new(0, 150, 0, 65)
+LocationPopup.BackgroundColor3 = Color3.fromRGB(25, 25, 29)
+LocationPopup.BorderSizePixel = 0
+LocationPopup.Visible = false
+LocationPopup.ZIndex = 20
+LocationPopup.Parent = Main
+
+local LocationPopupCorner = Instance.new("UICorner")
+LocationPopupCorner.CornerRadius = UDim.new(0, 7)
+LocationPopupCorner.Parent = LocationPopup
+
+local LocationPopupTitle = Instance.new("TextLabel")
+LocationPopupTitle.Size = UDim2.new(1, -30, 0, 30)
+LocationPopupTitle.Position = UDim2.new(0, 15, 0, 10)
+LocationPopupTitle.BackgroundTransparency = 1
+LocationPopupTitle.Text = "Select Location"
+LocationPopupTitle.TextColor3 = Color3.fromRGB(235, 235, 240)
+LocationPopupTitle.TextSize = 16
+LocationPopupTitle.Font = Enum.Font.GothamSemibold
+LocationPopupTitle.TextXAlignment = Enum.TextXAlignment.Left
+LocationPopupTitle.ZIndex = 21
+LocationPopupTitle.Parent = LocationPopup
+
+local LocationPopupStatus = Instance.new("TextLabel")
+LocationPopupStatus.Size = UDim2.new(1, -30, 0, 20)
+LocationPopupStatus.Position = UDim2.new(0, 15, 0, 38)
+LocationPopupStatus.BackgroundTransparency = 1
+LocationPopupStatus.Text = "Selected: Level 1 - Basic"
+LocationPopupStatus.TextColor3 = Color3.fromRGB(150, 150, 155)
+LocationPopupStatus.TextSize = 11
+LocationPopupStatus.Font = Enum.Font.Gotham
+LocationPopupStatus.TextXAlignment = Enum.TextXAlignment.Left
+LocationPopupStatus.ZIndex = 21
+LocationPopupStatus.Parent = LocationPopup
+
+--==================================================
+-- LOCATION BUTTON CREATOR
+--==================================================
+
+local LocationButtons = {}
+
+local function CreateLocationButton(Index, Position)
+    local Location = LOCATIONS[Index]
+
+    local Button = Instance.new("TextButton")
+    Button.Name = "Location" .. Index
+    Button.Size = UDim2.new(1, -30, 0, 45)
+    Button.Position = Position
+    Button.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    Button.BorderSizePixel = 0
+    Button.Text = Location.Name
+    Button.TextColor3 = Color3.fromRGB(230, 230, 235)
+    Button.TextSize = 13
+    Button.Font = Enum.Font.GothamMedium
+    Button.TextXAlignment = Enum.TextXAlignment.Left
+    Button.ZIndex = 21
+    Button.Parent = LocationPopup
+
+    local Padding = Instance.new("UIPadding")
+    Padding.PaddingLeft = UDim.new(0, 15)
+    Padding.Parent = Button
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 5)
+    Corner.Parent = Button
+
+    LocationButtons[Index] = Button
+
+    return Button
+end
+
+CreateLocationButton(
+    1,
+    UDim2.new(0, 15, 0, 65)
+)
+
+CreateLocationButton(
+    2,
+    UDim2.new(0, 15, 0, 117)
+)
+
+CreateLocationButton(
+    3,
+    UDim2.new(0, 15, 0, 169)
+)
+
+--==================================================
+-- LOCATION FUNCTIONS
+--==================================================
+
+local function UpdateLocationDisplay()
+    local Location = LOCATIONS[SelectedLocation]
+
+    if not Location then
+        return
+    end
+
+    LocationPopupStatus.Text =
+        "Selected: " .. Location.Name
+
+    HomeLocationStatus.Text =
+        "Location: " .. Location.Name
+
+    LocationsButton.Text =
+        "Locations: " .. Location.Name
+
+    for Index, Button in pairs(LocationButtons) do
+        if Index == SelectedLocation then
+            Button.BackgroundColor3 =
+                Color3.fromRGB(70, 130, 80)
+
+            Button.TextColor3 =
+                Color3.fromRGB(255, 255, 255)
+        else
+            Button.BackgroundColor3 =
+                Color3.fromRGB(35, 35, 40)
+
+            Button.TextColor3 =
+                Color3.fromRGB(230, 230, 235)
+        end
+    end
+end
+
+local function SelectLocation(Index)
+    if not LOCATIONS[Index] then
+        return
+    end
+
+    SelectedLocation = Index
+
+    UpdateLocationDisplay()
+
+    LocationPopup.Visible = false
+
+    print(
+        "[Locations] Selected:",
+        LOCATIONS[Index].Name
+    )
+end
+
+LocationButtons[1].MouseButton1Click:Connect(function()
+    SelectLocation(1)
+end)
+
+LocationButtons[2].MouseButton1Click:Connect(function()
+    SelectLocation(2)
+end)
+
+LocationButtons[3].MouseButton1Click:Connect(function()
+    SelectLocation(3)
+end)
+
+LocationsButton.MouseButton1Click:Connect(function()
+    LocationPopup.Visible =
+        not LocationPopup.Visible
+end)
+
+UpdateLocationDisplay()
+
+--==================================================
+-- TAB SWITCHING
+--==================================================
+
+HomeButton.MouseButton1Click:Connect(function()
+    HomeContent.Visible = true
+    HomeButton.BackgroundColor3 =
+        Color3.fromRGB(40, 40, 46)
+
+    LocationPopup.Visible = false
+end)
+
+--==================================================
+-- DRAGGING
+--==================================================
+
+local Dragging = false
+local DragStart = nil
+local StartPosition = nil
+
+TitleBar.InputBegan:Connect(function(Input)
+    if Input.UserInputType ==
+        Enum.UserInputType.MouseButton1
+    then
+        Dragging = true
+        DragStart = Input.Position
+        StartPosition = Main.Position
+    end
+end)
+
+TitleBar.InputEnded:Connect(function(Input)
+    if Input.UserInputType ==
+        Enum.UserInputType.MouseButton1
+    then
+        Dragging = false
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(Input)
+    if not Dragging then
+        return
+    end
+
+    if Input.UserInputType ==
+        Enum.UserInputType.MouseMovement
+    then
+        local Delta =
+            Input.Position - DragStart
+
+        Main.Position = UDim2.new(
+            StartPosition.X.Scale,
+            StartPosition.X.Offset + Delta.X,
+            StartPosition.Y.Scale,
+            StartPosition.Y.Offset + Delta.Y
+        )
+    end
+end)
+
+--==================================================
+-- PAN SCANNER
+--==================================================
+
+local function ScanForPan()
+    if not ScriptRunning then
+        return
+    end
+
+    local Character =
+        LocalPlayer.Character
+
+    if not Character then
+        CurrentPan = nil
+        CurrentCollect = nil
+        CurrentShake = nil
+        CurrentPanRemote = nil
+
+        PanStatus.Text =
+            "Pan: None equipped"
+
+        return
+    end
+
+    local FoundPan = nil
+    local FoundCollect = nil
+    local FoundShake = nil
+    local FoundPanRemote = nil
+
+    for _, Object in ipairs(
+        Character:GetChildren()
+    ) do
+
+        if Object:IsA("Tool") then
+
+            local Scripts =
+                Object:FindFirstChild("Scripts")
+
+            if Scripts then
+
+                local Collect =
+                    Scripts:FindFirstChild("Collect")
+
+                local Shake =
+                    Scripts:FindFirstChild("Shake")
+
+                local Pan =
+                    Scripts:FindFirstChild("Pan")
+
+                if Collect or Shake or Pan then
+
+                    FoundPan = Object
+
+                    if Collect
+                        and Collect:IsA("RemoteFunction")
+                    then
+                        FoundCollect = Collect
+                    end
+
+                    if Shake
+                        and Shake:IsA("RemoteEvent")
+                    then
+                        FoundShake = Shake
+                    end
+
+                    if Pan
+                        and Pan:IsA("RemoteFunction")
+                    then
+                        FoundPanRemote = Pan
+                    end
+
+                    break
+                end
+            end
+        end
+    end
+
+    CurrentPan = FoundPan
+    CurrentCollect = FoundCollect
+    CurrentShake = FoundShake
+    CurrentPanRemote = FoundPanRemote
+
+    if CurrentPan then
+        PanStatus.Text =
+            "Pan: " .. CurrentPan.Name
+
+        PanStatus.TextColor3 =
+            Color3.fromRGB(
+                180,
+                180,
+                185
+            )
+    else
+        PanStatus.Text =
+            "Pan: None equipped"
+
+        PanStatus.TextColor3 =
+            Color3.fromRGB(
+                150,
+                100,
+                100
+            )
+    end
+end
+
+--==================================================
+-- SAND
+--==================================================
+
+local function GetSand()
+    local Pan = CurrentPan
+
+    if not Pan or not Pan.Parent then
+        ScanForPan()
+        Pan = CurrentPan
+    end
+
+    if not Pan then
+        return 0, 0
+    end
+
+    local Fill =
+        Pan:GetAttribute("Fill") or 0
+
+    local Stats =
+        LocalPlayer:FindFirstChild("Stats")
+
+    if not Stats then
+        return Fill, 0
+    end
+
+    local Capacity =
+        Stats:GetAttribute("Capacity") or 0
+
+    return Fill, Capacity
+end
+
+local function UpdateSandDisplay()
+    if not ScriptRunning then
+        return
+    end
+
+    local Fill, Capacity =
+        GetSand()
+
+    SandStatus.Text =
+        "Sand: "
+        .. tostring(math.floor(Fill))
+        .. " / "
+        .. tostring(math.floor(Capacity))
+end
+
+--==================================================
+-- COLLECT
+--==================================================
+
+local function Collect()
+    if not ScriptRunning then
+        return
+    end
+
+    if not CurrentPan
+        or not CurrentPan.Parent
+    then
+        ScanForPan()
+    end
+
+    if not CurrentCollect then
+        warn(
+            "[Collect] Collect RemoteFunction not found."
+        )
+        return
+    end
+
+    local Args = {
+        1.00000000000000000,
+        false
+    }
+
+    local Success, Error =
+        pcall(function()
+            CurrentCollect:InvokeServer(
+                unpack(Args)
+            )
+        end)
+
+    if not Success then
+        warn(
+            "[Collect] Error:",
+            Error
+        )
+    end
+end
+
+--==================================================
+-- BASIC SHAKE
+--==================================================
+
+local function ShakePan()
+    if not ScriptRunning then
+        return
+    end
+
+    if not CurrentPan
+        or not CurrentPan.Parent
+    then
+        ScanForPan()
+    end
+
+    if not CurrentShake then
+        warn(
+            "[Shake] Shake RemoteEvent not found."
+        )
+        return
+    end
+
+    pcall(function()
+        CurrentShake:FireServer()
+    end)
+end
+
+--==================================================
+-- WATER PAN
+--==================================================
+
+local function StartWaterPan()
+    if not ScriptRunning then
+        return false
+    end
+
+    ScanForPan()
+
+    if not CurrentPan then
+        warn(
+            "[Pan] No equipped pan."
+        )
+        return false
+    end
+
+    local Scripts =
+        CurrentPan:FindFirstChild("Scripts")
+
+    if not Scripts then
+        warn(
+            "[Pan] Scripts folder missing."
+        )
+        return false
+    end
+
+    local PanRemote =
+        Scripts:FindFirstChild("Pan")
+
+    if not PanRemote then
+        warn(
+            "[Pan] Pan RemoteFunction missing."
+        )
+        return false
+    end
+
+    if not PanRemote:IsA("RemoteFunction") then
+        warn(
+            "[Pan] Pan is "
+            .. PanRemote.ClassName
+        )
+        return false
+    end
+
+    CurrentPanRemote = PanRemote
+
+    local Character =
+        LocalPlayer.Character
+
+    if not Character then
+        return false
+    end
+
+    print(
+        "[Pan] Calling Pan:InvokeServer()"
+    )
+
+    local Success, Result =
+        pcall(function()
+            return PanRemote:InvokeServer()
+        end)
+
+    if not Success then
+        warn(
+            "[Pan] Pan InvokeServer error:",
+            Result
+        )
+        return false
+    end
+
+    print(
+        "[Pan] Pan result:",
+        tostring(Result)
+    )
+
+    if Result ~= true then
+        warn(
+            "[Pan] Pan activation rejected."
+        )
+        return false
+    end
+
+    local Timeout =
+        os.clock() + 5
+
+    while
+        ScriptRunning
+        and (AutoFarm or AutoShake)
+        and os.clock() < Timeout
+    do
+        if Character:GetAttribute(
+            "Panning"
+        ) == true then
+
+            print(
+                "[Pan] Panning = true"
+            )
+
+            return true
+        end
+
+        task.wait(0.05)
+    end
+
+    warn(
+        "[Pan] Server accepted Pan, "
+        .. "but Panning never became true."
+    )
+
+    return false
+end
+
+--==================================================
+-- SHAKE WHILE PANNING
+--==================================================
+
+local function ShakeWhilePanning()
+    if not ScriptRunning then
+        return false
+    end
+
+    local Character =
+        LocalPlayer.Character
+
+    if not Character then
+        return false
+    end
+
+    ScanForPan()
+
+    if not CurrentShake then
+        warn(
+            "[Shake] Shake RemoteEvent missing."
+        )
+        return false
+    end
+
+    local Stats =
+        LocalPlayer:FindFirstChild("Stats")
+
+    local ShakeSpeed = 2
+
+    if Stats then
+        ShakeSpeed =
+            Stats:GetAttribute(
+                "ShakeSpeed"
+            ) or 1
+    end
+
+    ShakeSpeed =
+        math.max(
+            ShakeSpeed,
+            0.1
+        )
+
+    local Cooldown =
+        0.3 / ShakeSpeed
+
+    print(
+        "[Shake] ShakeSpeed:",
+        ShakeSpeed,
+        "Cooldown:",
+        Cooldown
+    )
+
+    while
+        ScriptRunning
+        and (AutoFarm or AutoShake)
+        and Character:GetAttribute(
+            "Panning"
+        ) == true
+    do
+
+        if not CurrentShake
+            or not CurrentShake.Parent
+        then
+
+            ScanForPan()
+
+            if not CurrentShake then
+                break
+            end
+        end
+
+        pcall(function()
+            CurrentShake:FireServer()
+        end)
+
+        task.wait(Cooldown)
+    end
+
+    return true
+end
+
+--==================================================
+-- SELL
+--==================================================
+
+local GetInventorySellPrice
+local SellEvent
+
+pcall(function()
+
+    GetInventorySellPrice =
+        ReplicatedStorage
+            :WaitForChild("Remotes")
+            :WaitForChild("Shop")
+            :WaitForChild("GetInventorySellPrice")
+
+    SellEvent =
+        ReplicatedStorage
+            :WaitForChild("Remotes")
+            :WaitForChild("Shop")
+            :WaitForChild("SellAll")
+
+end)
+
+local function SellAll()
+    if not ScriptRunning then
+        return
+    end
+
+    if GetInventorySellPrice
+        and GetInventorySellPrice.Parent
+    then
+
+        pcall(function()
+
+            if GetInventorySellPrice:IsA(
+                "RemoteFunction"
+            ) then
+
+                GetInventorySellPrice:InvokeServer()
+
+            elseif GetInventorySellPrice:IsA(
+                "RemoteEvent"
+            ) then
+
+                GetInventorySellPrice:FireServer()
+
+            end
+
+        end)
+    end
+
+    task.wait(0.1)
+
+    if SellEvent
+        and SellEvent.Parent
+    then
+
+        pcall(function()
+
+            if SellEvent:IsA(
+                "RemoteEvent"
+            ) then
+
+                SellEvent:FireServer()
+
+            elseif SellEvent:IsA(
+                "RemoteFunction"
+            ) then
+
+                SellEvent:InvokeServer()
+
+            end
+
+        end)
+    else
+
+        warn(
+            "[Sell] SellAll not found."
+        )
+    end
+end
+
+local function StartAutoSell()
+    if AutoSellThread then
+        return
+    end
+
+    AutoSellThread =
+        task.spawn(function()
+
+            while
+                AutoSell
+                and ScriptRunning
+            do
+
+                SellAll()
+
+                task.wait(
+                    AUTO_SELL_DELAY
+                )
+            end
+
+            AutoSellThread = nil
+        end)
+end
+
+--==================================================
+-- TWEEN
+--==================================================
+
+local function TweenTo(Position)
+    if not ScriptRunning then
+        return false
+    end
+
+    local Character =
+        LocalPlayer.Character
+
+    if not Character then
+        return false
+    end
+
+    local RootPart =
+        Character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    if not RootPart then
+        return false
+    end
+
+    local Distance =
+        (
+            RootPart.Position
+            - Position
+        ).Magnitude
+
+    local Duration =
+        math.max(
+            Distance / 45,
+            0.5
+        )
+
+    local Tween =
+        TweenService:Create(
+            RootPart,
+
+            TweenInfo.new(
+                Duration,
+                Enum.EasingStyle.Linear
+            ),
+
+            {
+                CFrame =
+                    CFrame.new(Position)
+            }
+        )
+
+    local Finished = false
+    local Connection
+
+    Connection =
+        Tween.Completed:Connect(
+            function()
+                Finished = true
+
+                if Connection then
+                    Connection:Disconnect()
+                end
+            end
+        )
+
+    Tween:Play()
+
+    while
+        ScriptRunning
+        and not Finished
+    do
+        task.wait()
+    end
+
+    return ScriptRunning
+end
+
+--==================================================
+-- AUTO FARM
+--==================================================
+
+local function RunAutoFarm()
+
+    if AutoFarmThread then
+        return
+    end
+
+    AutoFarmThread =
+        task.spawn(function()
+
+            while
+                AutoFarm
+                and ScriptRunning
+            do
+
+                ScanForPan()
+                UpdateSandDisplay()
+
+                if not CurrentPan then
+                    task.wait(1)
+                    continue
+                end
+
+                local Fill, Capacity =
+                    GetSand()
+
+                print(
+                    "[AutoFarm] Sand:",
+                    Fill,
+                    "/",
+                    Capacity
+                )
+
+                if Capacity <= 0 then
+                    print(
+                        "[AutoFarm] Capacity not detected."
+                    )
+
+                    task.wait(0.5)
+                    continue
+                end
+
+                --==================================================
+                -- SELECTED LOCATION
+                --==================================================
+
+                local Location =
+                    LOCATIONS[SelectedLocation]
+
+                if not Location then
+                    warn(
+                        "[AutoFarm] Selected location missing."
+                    )
+
+                    task.wait(1)
+                    continue
+                end
+
+                local SandPosition =
+                    Location.Sand
+
+                local WaterPosition =
+                    Location.Water
+
+                print(
+                    "[AutoFarm] Using location:",
+                    Location.Name
+                )
+
+                --==================================================
+                -- GO DIG
+                --==================================================
+
+                if Fill < Capacity then
+
+                    print(
+                        "[AutoFarm] Going to sand:",
+                        Location.Name
+                    )
+
+                    if not TweenTo(
+                        SandPosition
+                    ) then
+                        break
+                    end
+
+                    if not AutoFarm
+                        or not ScriptRunning
+                    then
+                        break
+                    end
+
+                    while
+                        AutoFarm
+                        and ScriptRunning
+                    do
+
+                        ScanForPan()
+
+                        local CurrentFill,
+                            CurrentCapacity =
+                            GetSand()
+
+                        UpdateSandDisplay()
+
+                        if not CurrentPan then
+                            break
+                        end
+
+                        if CurrentCapacity <= 0 then
+                            task.wait(0.5)
+                            continue
+                        end
+
+                        if CurrentFill >=
+                            CurrentCapacity
+                        then
+                            break
+                        end
+
+                        Collect()
+
+                        task.wait(
+                            AUTO_COLLECT_DELAY
+                        )
+                    end
+                end
+
+                if not AutoFarm
+                    or not ScriptRunning
+                then
+                    break
+                end
+
+                ScanForPan()
+
+                local FinalFill,
+                    FinalCapacity =
+                    GetSand()
+
+                UpdateSandDisplay()
+
+                if not CurrentPan then
+                    task.wait(0.5)
+                    continue
+                end
+
+                if FinalCapacity <= 0 then
+                    task.wait(0.5)
+                    continue
+                end
+
+                if FinalFill < FinalCapacity then
+                    task.wait(0.2)
+                    continue
+                end
+
+                --==================================================
+                -- GO WATER
+                --==================================================
+
+                print(
+                    "[AutoFarm] Pan full. Going to water:",
+                    Location.Name
+                )
+
+                if not TweenTo(
+                    WaterPosition
+                ) then
+                    break
+                end
+
+                if not AutoFarm
+                    or not ScriptRunning
+                then
+                    break
+                end
+
+                task.wait(0.75)
+
+                --==================================================
+                -- START PANNING
+                --==================================================
+
+                local Started =
+                    StartWaterPan()
+
+                if not Started then
+
+                    warn(
+                        "[AutoFarm] Failed to start panning."
+                    )
+
+                    task.wait(1)
+                    continue
+                end
+
+                -- SAME SHAKE MECHANIC
+                ShakeWhilePanning()
+
+                --==================================================
+                -- WAIT UNTIL EMPTY
+                --==================================================
+
+                local EmptyTimeout =
+                    os.clock() + 30
+
+                while
+                    AutoFarm
+                    and ScriptRunning
+                    and os.clock() < EmptyTimeout
+                do
+
+                    UpdateSandDisplay()
+
+                    local CurrentFill,
+                        CurrentCapacity =
+                        GetSand()
+
+                    if CurrentFill <= 0 then
+
+                        print(
+                            "[AutoFarm] Pan emptied."
+                        )
+
+                        break
+                    end
+
+                    local Character =
+                        LocalPlayer.Character
+
+                    if Character
+                        and Character:GetAttribute(
+                            "Panning"
+                        ) ~= true
+                    then
+
+                        print(
+                            "[AutoFarm] Panning stopped. Restarting."
+                        )
+
+                        task.wait(0.25)
+
+                        local Restarted =
+                            StartWaterPan()
+
+                        if Restarted then
+                            ShakeWhilePanning()
+                        end
+                    end
+
+                    task.wait(0.1)
+                end
+
+                task.wait(0.25)
+            end
+
+            AutoFarmThread = nil
+        end)
+end
+
+--==================================================
+-- AUTO COLLECT
+--==================================================
+
+local function StartAutoCollect()
+
+    if AutoCollectThread then
+        return
+    end
+
+    AutoCollectThread =
+        task.spawn(function()
+
+            while
+                AutoCollect
+                and ScriptRunning
+            do
+
+                Collect()
+                UpdateSandDisplay()
+
+                task.wait(
+                    AUTO_COLLECT_DELAY
+                )
+            end
+
+            AutoCollectThread = nil
+        end)
+end
+
+--==================================================
+-- AUTO SHAKE
+--==================================================
+
+local function StartAutoShake()
+
+    if AutoShakeThread then
+        return
+    end
+
+    AutoShakeThread =
+        task.spawn(function()
+
+            while
+                AutoShake
+                and ScriptRunning
+            do
+
+                local Character =
+                    LocalPlayer.Character
+
+                if not Character then
+                    task.wait(0.25)
+                    continue
+                end
+
+                --==============================================
+                -- IF NOT CURRENTLY PANNING, START THE PAN
+                --==============================================
+
+                if Character:GetAttribute(
+                    "Panning"
+                ) ~= true then
+
+                    ScanForPan()
+
+                    if not CurrentPan then
+                        task.wait(0.5)
+                        continue
+                    end
+
+                    print(
+                        "[AutoShake] Starting pan..."
+                    )
+
+                    local Started =
+                        StartWaterPan()
+
+                    if not Started then
+                        task.wait(0.5)
+                        continue
+                    end
+                end
+
+                --==============================================
+                -- USE THE EXACT SAME SHAKE MECHANIC AS AUTOFARM
+                --==============================================
+
+                ShakeWhilePanning()
+
+                task.wait(0.05)
+            end
+
+            AutoShakeThread = nil
+        end)
+end
+
+--==================================================
+-- BUTTON EVENTS
+--==================================================
+
+CollectButton.MouseButton1Click:Connect(
+    function()
+
+        Collect()
+        UpdateSandDisplay()
+
+    end
+)
+
+AutoCollectButton.MouseButton1Click:Connect(
+    function()
+
+        AutoCollect =
+            not AutoCollect
+
+        if AutoCollect then
+
+            AutoCollectButton.Text =
+                "Auto Collect: ON"
+
+            AutoCollectButton.BackgroundColor3 =
+                Color3.fromRGB(
+                    70,
+                    130,
+                    80
+                )
+
+            StartAutoCollect()
+
+        else
+
+            AutoCollectButton.Text =
+                "Auto Collect: OFF"
+
+            AutoCollectButton.BackgroundColor3 =
+                Color3.fromRGB(
+                    35,
+                    35,
+                    40
+                )
+        end
+    end
+)
+
+--==================================================
+-- AUTO SHAKE BUTTON
+--==================================================
+
+AutoShakeButton.MouseButton1Click:Connect(
+    function()
+
+        AutoShake =
+            not AutoShake
+
+        if AutoShake then
+
+            AutoShakeButton.Text =
+                "Auto Shake: ON"
+
+            AutoShakeButton.BackgroundColor3 =
+                Color3.fromRGB(
+                    70,
+                    130,
+                    80
+                )
+
+            StartAutoShake()
+
+        else
+
+            AutoShakeButton.Text =
+                "Auto Shake: OFF"
+
+            AutoShakeButton.BackgroundColor3 =
+                Color3.fromRGB(
+                    35,
+                    35,
+                    40
+                )
+        end
+    end
+)
+
+--==================================================
+-- AUTO SELL BUTTON
+--==================================================
+
+AutoSellButton.MouseButton1Click:Connect(
+    function()
+
+        AutoSell =
+            not AutoSell
+
+        if AutoSell then
+
+            AutoSellButton.Text =
+                "Auto Sell: ON"
+
+            AutoSellButton.BackgroundColor3 =
+                Color3.fromRGB(
+                    70,
+                    130,
+                    80
+                )
+
+            StartAutoSell()
+
+        else
+
+            AutoSellButton.Text =
+                "Auto Sell: OFF"
+
+            AutoSellButton.BackgroundColor3 =
+                Color3.fromRGB(
+                    35,
+                    35,
+                    40
+                )
+        end
+    end
+)
+
+--==================================================
+-- AUTO FARM BUTTON
+--==================================================
+
+AutoFarmButton.MouseButton1Click:Connect(
+    function()
+
+        AutoFarm =
+            not AutoFarm
+
+        if AutoFarm then
+
+            AutoFarmButton.Text =
+                "Auto Farm: ON"
+
+            AutoFarmButton.BackgroundColor3 =
+                Color3.fromRGB(
+                    70,
+                    130,
+                    80
+                )
+
+            RunAutoFarm()
+
+        else
+
+            AutoFarmButton.Text =
+                "Auto Farm: OFF"
+
+            AutoFarmButton.BackgroundColor3 =
+                Color3.fromRGB(
+                    35,
+                    35,
+                    40
+                )
+        end
+    end
+)
+
+--==================================================
+-- SEARCH
+--==================================================
+
+local AllButtons = {
+    CollectButton,
+    AutoCollectButton,
+    AutoShakeButton,
+    AutoSellButton,
+    AutoFarmButton,
+    Feature3Button,
+    Feature4Button
+}
+
+SearchBox:GetPropertyChangedSignal(
+    "Text"
+):Connect(function()
+
+    local Search =
+        string.lower(
+            SearchBox.Text
+        )
+
+    for _, Button in ipairs(
+        AllButtons
+    ) do
+
+        local ButtonText =
+            string.lower(
+                Button.Text
+            )
+
+        local ButtonName =
+            string.lower(
+                Button.Name
+            )
+
+        Button.Visible =
+            Search == ""
+            or string.find(
+                ButtonText,
+                Search,
+                1,
+                true
+            ) ~= nil
+            or string.find(
+                ButtonName,
+                Search,
+                1,
+                true
+            ) ~= nil
+    end
+end)
+
+--==================================================
+-- CHARACTER RESPAWN
+--==================================================
+
+Connections.CharacterAdded =
+    LocalPlayer.CharacterAdded:Connect(
+        function()
+
+            task.wait(1)
+
+            if not ScriptRunning then
+                return
+            end
+
+            ScanForPan()
+            UpdateSandDisplay()
+        end
+    )
+
+--==================================================
+-- 20 SECOND SCANNER
+--==================================================
+
+task.spawn(function()
+
+    while ScriptRunning do
+
+        for i =
+            PAN_SCAN_INTERVAL,
+            1,
+            -1
+        do
+
+            if not ScriptRunning then
+                return
+            end
+
+            ScanStatus.Text =
+                "Next scan: "
+                .. tostring(i)
+                .. "s"
+
+            UpdateSandDisplay()
+
+            task.wait(1)
+        end
+
+        ScanForPan()
+    end
+end)
+
+--==================================================
+-- INSERT / RIGHT CONTROL
+--==================================================
+
+Connections.InputBegan =
+    UserInputService.InputBegan:Connect(
+        function(
+            Input,
+            GameProcessed
+        )
+
+            if GameProcessed then
+                return
+            end
+
+            if Input.KeyCode ==
+                Enum.KeyCode.Insert
+                or Input.KeyCode ==
+                Enum.KeyCode.RightControl
+            then
+
+                Main.Visible =
+                    not Main.Visible
+
+                if not Main.Visible then
+                    LocationPopup.Visible = false
+                end
+            end
+        end
+    )
+
+--==================================================
+-- SHUTDOWN
+--==================================================
+
+local function Shutdown()
+
+    if not ScriptRunning then
+        return
+    end
+
+    ScriptRunning = false
+
+    AutoCollect = false
+    AutoShake = false
+    AutoSell = false
+    AutoFarm = false
+
+    for _, Connection in ipairs(
+        Connections
+    ) do
+
+        pcall(function()
+            Connection:Disconnect()
+        end)
+    end
+
+    Connections = {}
+
+    if ScreenGui then
+        ScreenGui:Destroy()
+    end
+end
+
+CloseButton.MouseButton1Click:Connect(
+    Shutdown
+)
+
+--==================================================
+-- INITIALIZE
+--==================================================
+
+task.spawn(function()
+
+    task.wait(0.5)
+
+    if ScriptRunning then
+
+        ScanForPan()
+        UpdateSandDisplay()
+        UpdateLocationDisplay()
+
+    end
+end)
