@@ -1211,46 +1211,316 @@ end
 -- COLLISION-AWARE TWEEN HELPERS
 --==================================================
 
+--==================================================
+-- FIXED MOVEMENT SYSTEM
+--==================================================
+
 local function GetGroundY(Position, Character)
-
-    local RayParams =
-        RaycastParams.new()
-
-    RayParams.FilterType =
-        Enum.RaycastFilterType.Exclude
-
-    RayParams.FilterDescendantsInstances = {
-        Character
-    }
-
+    local RayParams = RaycastParams.new()
+    RayParams.FilterType = Enum.RaycastFilterType.Exclude
+    RayParams.FilterDescendantsInstances = {Character}
     RayParams.IgnoreWater = false
 
-    local Origin =
-        Position + Vector3.new(
-            0,
-            5,
-            0
-        )
-
-    local Direction =
-        Vector3.new(
-            0,
-            -GROUND_RAY_DISTANCE,
-            0
-        )
-
-    local Result =
-        Workspace:Raycast(
-            Origin,
-            Direction,
-            RayParams
-        )
+    local Result = Workspace:Raycast(
+        Position + Vector3.new(0, 5, 0),
+        Vector3.new(0, -GROUND_RAY_DISTANCE, 0),
+        RayParams
+    )
 
     if Result then
-
         return Result.Position.Y
-
     end
+
+    return nil
+end
+
+local function GetSafeHeight(Position, Character)
+    local GroundY = GetGroundY(Position, Character)
+
+    if not GroundY then
+        return Position.Y
+    end
+
+    local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+    local RootPart = Character:FindFirstChild("HumanoidRootPart")
+
+    local Height = GROUND_CLEARANCE
+
+    if Humanoid and RootPart then
+        Height = math.max(
+            GROUND_CLEARANCE,
+            Humanoid.HipHeight + RootPart.Size.Y / 2
+        )
+    end
+
+    return math.max(
+        Position.Y,
+        GroundY + Height
+    )
+end
+
+--==================================================
+-- DIRECT MOVEMENT
+--==================================================
+
+local function TweenSegment(RootPart, TargetPosition, Character)
+    if not ScriptRunning then
+        return false
+    end
+
+    if not RootPart or not RootPart.Parent then
+        return false
+    end
+
+    local StartCFrame = RootPart.CFrame
+    local StartPosition = StartCFrame.Position
+
+    local Distance =
+        (StartPosition - TargetPosition).Magnitude
+
+    if Distance <= 0.05 then
+        RootPart.CFrame = CFrame.new(TargetPosition)
+        return true
+    end
+
+    local Duration = math.max(
+        Distance / TWEEN_SPEED,
+        MIN_TWEEN_DURATION
+    )
+
+    local StartTime = os.clock()
+
+    while ScriptRunning do
+        if not RootPart.Parent then
+            return false
+        end
+
+        local Alpha =
+            math.clamp(
+                (os.clock() - StartTime) / Duration,
+                0,
+                1
+            )
+
+        local NewPosition =
+            StartPosition:Lerp(
+                TargetPosition,
+                Alpha
+            )
+
+        -- Directly update the root instead of relying
+        -- on TweenService controlling the HumanoidRootPart.
+        RootPart.CFrame =
+            CFrame.new(NewPosition)
+
+        if Alpha >= 1 then
+            break
+        end
+
+        task.wait()
+    end
+
+    if not ScriptRunning then
+        return false
+    end
+
+    RootPart.CFrame =
+        CFrame.new(TargetPosition)
+
+    return true
+end
+
+--==================================================
+-- FIXED TWEEN TO
+--==================================================
+
+local function TweenTo(Position)
+
+    if not ScriptRunning then
+        return false
+    end
+
+    local Character =
+        LocalPlayer.Character
+
+    if not Character then
+        warn("[Movement] Character not found.")
+        return false
+    end
+
+    local RootPart =
+        Character:FindFirstChild("HumanoidRootPart")
+
+    if not RootPart then
+        warn("[Movement] HumanoidRootPart not found.")
+        return false
+    end
+
+    print(
+        "[Movement] Starting:",
+        RootPart.Position,
+        "->",
+        Position
+    )
+
+    local StartPosition =
+        RootPart.Position
+
+    local HorizontalStart =
+        Vector3.new(
+            StartPosition.X,
+            0,
+            StartPosition.Z
+        )
+
+    local HorizontalTarget =
+        Vector3.new(
+            Position.X,
+            0,
+            Position.Z
+        )
+
+    local HorizontalDistance =
+        (
+            HorizontalStart
+            - HorizontalTarget
+        ).Magnitude
+
+    local SegmentCount =
+        math.max(
+            1,
+            math.ceil(
+                HorizontalDistance
+                / TWEEN_SEGMENT_DISTANCE
+            )
+        )
+
+    --==================================================
+    -- DETERMINE TRAVEL HEIGHT
+    --==================================================
+
+    local TravelHeight =
+        math.max(
+            StartPosition.Y,
+            GetSafeHeight(
+                Vector3.new(
+                    StartPosition.X,
+                    Position.Y,
+                    StartPosition.Z
+                ),
+                Character
+            )
+        )
+
+    --==================================================
+    -- MOVE UP
+    --==================================================
+
+    if StartPosition.Y < TravelHeight - 0.1 then
+
+        print(
+            "[Movement] Raising to:",
+            TravelHeight
+        )
+
+        local RaisedPosition =
+            Vector3.new(
+                StartPosition.X,
+                TravelHeight,
+                StartPosition.Z
+            )
+
+        if not TweenSegment(
+            RootPart,
+            RaisedPosition,
+            Character
+        ) then
+            warn("[Movement] Failed while raising.")
+            return false
+        end
+    end
+
+    --==================================================
+    -- HORIZONTAL MOVEMENT
+    --==================================================
+
+    for Index = 1, SegmentCount do
+
+        if not ScriptRunning then
+            return false
+        end
+
+        if not RootPart.Parent then
+            return false
+        end
+
+        local Alpha =
+            Index / SegmentCount
+
+        local X =
+            StartPosition.X
+            + (
+                Position.X
+                - StartPosition.X
+            ) * Alpha
+
+        local Z =
+            StartPosition.Z
+            + (
+                Position.Z
+                - StartPosition.Z
+            ) * Alpha
+
+        local SegmentPosition =
+            Vector3.new(
+                X,
+                TravelHeight,
+                Z
+            )
+
+        if not TweenSegment(
+            RootPart,
+            SegmentPosition,
+            Character
+        ) then
+            warn(
+                "[Movement] Failed at segment",
+                Index,
+                "/",
+                SegmentCount
+            )
+
+            return false
+        end
+    end
+
+    --==================================================
+    -- FINAL POSITION
+    --==================================================
+
+    local FinalPosition =
+        Vector3.new(
+            Position.X,
+            Position.Y,
+            Position.Z
+        )
+
+    if not TweenSegment(
+        RootPart,
+        FinalPosition,
+        Character
+    ) then
+        warn("[Movement] Failed final descent.")
+        return false
+    end
+
+    print(
+        "[Movement] Arrived:",
+        RootPart.Position
+    )
+
+    return true
+end
 
     return nil
 end
@@ -1444,6 +1714,129 @@ end
 -- COLLISION-AWARE TWEEN
 --==================================================
 
+--==================================================
+-- FIXED MOVEMENT SYSTEM
+--==================================================
+
+local function GetGroundY(Position, Character)
+    local RayParams = RaycastParams.new()
+    RayParams.FilterType = Enum.RaycastFilterType.Exclude
+    RayParams.FilterDescendantsInstances = {Character}
+    RayParams.IgnoreWater = false
+
+    local Result = Workspace:Raycast(
+        Position + Vector3.new(0, 5, 0),
+        Vector3.new(0, -GROUND_RAY_DISTANCE, 0),
+        RayParams
+    )
+
+    if Result then
+        return Result.Position.Y
+    end
+
+    return nil
+end
+
+local function GetSafeHeight(Position, Character)
+    local GroundY = GetGroundY(Position, Character)
+
+    if not GroundY then
+        return Position.Y
+    end
+
+    local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+    local RootPart = Character:FindFirstChild("HumanoidRootPart")
+
+    local Height = GROUND_CLEARANCE
+
+    if Humanoid and RootPart then
+        Height = math.max(
+            GROUND_CLEARANCE,
+            Humanoid.HipHeight + RootPart.Size.Y / 2
+        )
+    end
+
+    return math.max(
+        Position.Y,
+        GroundY + Height
+    )
+end
+
+--==================================================
+-- DIRECT MOVEMENT
+--==================================================
+
+local function TweenSegment(RootPart, TargetPosition, Character)
+    if not ScriptRunning then
+        return false
+    end
+
+    if not RootPart or not RootPart.Parent then
+        return false
+    end
+
+    local StartCFrame = RootPart.CFrame
+    local StartPosition = StartCFrame.Position
+
+    local Distance =
+        (StartPosition - TargetPosition).Magnitude
+
+    if Distance <= 0.05 then
+        RootPart.CFrame = CFrame.new(TargetPosition)
+        return true
+    end
+
+    local Duration = math.max(
+        Distance / TWEEN_SPEED,
+        MIN_TWEEN_DURATION
+    )
+
+    local StartTime = os.clock()
+
+    while ScriptRunning do
+        if not RootPart.Parent then
+            return false
+        end
+
+        local Alpha =
+            math.clamp(
+                (os.clock() - StartTime) / Duration,
+                0,
+                1
+            )
+
+        local NewPosition =
+            StartPosition:Lerp(
+                TargetPosition,
+                Alpha
+            )
+
+        -- Directly update the root instead of relying
+        -- on TweenService controlling the HumanoidRootPart.
+        RootPart.CFrame =
+            CFrame.new(NewPosition)
+
+        if Alpha >= 1 then
+            break
+        end
+
+        task.wait()
+    end
+
+    if not ScriptRunning then
+        return false
+    end
+
+    RootPart.CFrame =
+        CFrame.new(TargetPosition)
+
+    return true
+end
+
+--==================================================
+-- FIXED TWEEN TO
+--==================================================
+
 local function TweenTo(Position)
 
     if not ScriptRunning then
@@ -1454,21 +1847,24 @@ local function TweenTo(Position)
         LocalPlayer.Character
 
     if not Character then
+        warn("[Movement] Character not found.")
         return false
     end
 
     local RootPart =
-        Character:FindFirstChild(
-            "HumanoidRootPart"
-        )
+        Character:FindFirstChild("HumanoidRootPart")
 
     if not RootPart then
+        warn("[Movement] HumanoidRootPart not found.")
         return false
     end
 
-    --==================================================
-    -- BUILD A SAFE ROUTE
-    --==================================================
+    print(
+        "[Movement] Starting:",
+        RootPart.Position,
+        "->",
+        Position
+    )
 
     local StartPosition =
         RootPart.Position
@@ -1502,62 +1898,13 @@ local function TweenTo(Position)
             )
         )
 
-    local Waypoints = {}
-
-    -- Find the highest safe floor height
-    -- along the route so we don't dip
-    -- through terrain during the tween.
-
-    local RouteHeight =
-        StartPosition.Y
-
-    for Index = 1, SegmentCount do
-
-        local Alpha =
-            Index / SegmentCount
-
-        local X =
-            StartPosition.X
-            + (
-                Position.X
-                - StartPosition.X
-            ) * Alpha
-
-        local Z =
-            StartPosition.Z
-            + (
-                Position.Z
-                - StartPosition.Z
-            ) * Alpha
-
-        local SamplePosition =
-            Vector3.new(
-                X,
-                Position.Y,
-                Z
-            )
-
-        local SafeY =
-            GetSafeHeight(
-                SamplePosition,
-                Character
-            )
-
-        RouteHeight =
-            math.max(
-                RouteHeight,
-                SafeY
-            )
-
-    end
-
     --==================================================
-    -- MOVE UP FIRST
+    -- DETERMINE TRAVEL HEIGHT
     --==================================================
 
-    local SafeTravelHeight =
+    local TravelHeight =
         math.max(
-            RouteHeight,
+            StartPosition.Y,
             GetSafeHeight(
                 Vector3.new(
                     StartPosition.X,
@@ -1568,12 +1915,21 @@ local function TweenTo(Position)
             )
         )
 
-    if StartPosition.Y < SafeTravelHeight - 0.1 then
+    --==================================================
+    -- MOVE UP
+    --==================================================
+
+    if StartPosition.Y < TravelHeight - 0.1 then
+
+        print(
+            "[Movement] Raising to:",
+            TravelHeight
+        )
 
         local RaisedPosition =
             Vector3.new(
                 StartPosition.X,
-                SafeTravelHeight,
+                TravelHeight,
                 StartPosition.Z
             )
 
@@ -1582,7 +1938,7 @@ local function TweenTo(Position)
             RaisedPosition,
             Character
         ) then
-
+            warn("[Movement] Failed while raising.")
             return false
         end
     end
@@ -1591,12 +1947,13 @@ local function TweenTo(Position)
     -- HORIZONTAL MOVEMENT
     --==================================================
 
-    local CurrentPosition =
-        RootPart.Position
-
     for Index = 1, SegmentCount do
 
         if not ScriptRunning then
+            return false
+        end
+
+        if not RootPart.Parent then
             return false
         end
 
@@ -1620,26 +1977,7 @@ local function TweenTo(Position)
         local SegmentPosition =
             Vector3.new(
                 X,
-                SafeTravelHeight,
-                Z
-            )
-
-        -- Keep the movement at or above
-        -- the detected floor.
-
-        local SafeY =
-            GetSafeHeight(
-                SegmentPosition,
-                Character
-            )
-
-        SegmentPosition =
-            Vector3.new(
-                X,
-                math.max(
-                    SafeTravelHeight,
-                    SafeY
-                ),
+                TravelHeight,
                 Z
             )
 
@@ -1648,37 +1986,25 @@ local function TweenTo(Position)
             SegmentPosition,
             Character
         ) then
+            warn(
+                "[Movement] Failed at segment",
+                Index,
+                "/",
+                SegmentCount
+            )
 
             return false
         end
-
-        CurrentPosition =
-            RootPart.Position
     end
 
     --==================================================
-    -- FINAL DESCENT
+    -- FINAL POSITION
     --==================================================
-
-    local FinalSafeY =
-        GetSafeHeight(
-            Position,
-            Character
-        )
-
-    -- Don't force the character below
-    -- the detected floor.
-
-    local FinalY =
-        math.max(
-            Position.Y,
-            FinalSafeY
-        )
 
     local FinalPosition =
         Vector3.new(
             Position.X,
-            FinalY,
+            Position.Y,
             Position.Z
         )
 
@@ -1687,11 +2013,16 @@ local function TweenTo(Position)
         FinalPosition,
         Character
     ) then
-
+        warn("[Movement] Failed final descent.")
         return false
     end
 
-    return ScriptRunning
+    print(
+        "[Movement] Arrived:",
+        RootPart.Position
+    )
+
+    return true
 end
 
 --==================================================
