@@ -1,0 +1,4697 @@
+--// Charles's Auto Tool 
+--// Auto Farm + Auto Collect + Auto Shake + Auto Sell 
+--// Workspace.Geode Fast Path 
+--// Movement Modes: 
+--// Tween / Path Tween / Safe Tween / TP 
+--// All major settings configurable from GUI 
+--// Custom Levels can be added through the Locations GUI
+ 
+--================================================== 
+-- SERVICES 
+--================================================== 
+ 
+local Players = game:GetService("Players") 
+local ReplicatedStorage = game:GetService("ReplicatedStorage") 
+local HttpService = game:GetService("HttpService") 
+local TweenService = game:GetService("TweenService") 
+local UserInputService = game:GetService("UserInputService") 
+local Workspace = game:GetService("Workspace") 
+local PathfindingService = game:GetService("PathfindingService") 
+ 
+local LocalPlayer = Players.LocalPlayer 
+ 
+--================================================== 
+-- DEFAULT SETTINGS 
+--================================================== 
+ 
+local SETTINGS = { 
+ 
+    -- General 
+    PAN_SCAN_INTERVAL = 20, 
+    AUTO_COLLECT_DELAY = 0.1, 
+    AUTO_SELL_DELAY = 1, 
+ 
+    -- Normal movement 
+    TWEEN_SPEED = 65, 
+    MIN_TWEEN_DURATION = 0.12, 
+    GROUND_CLEARANCE = 3, 
+    GROUND_RAY_DISTANCE = 100, 
+    TWEEN_SEGMENT_DISTANCE = 16, 
+    MOVEMENT_TIMEOUT = 5, 
+    POSITION_TOLERANCE = 1.5, 
+ 
+    -- Geode movement 
+    FAST_PATH_SPEED = 115, 
+    FAST_PATH_RESCAN_DELAY = 0.10, 
+    FAST_PATH_WAYPOINT_TIMEOUT = 3, 
+    FAST_PATH_TARGET_TOLERANCE = 0.75, 
+    GEODE_FAILED_TARGET_COOLDOWN = 2, 
+ 
+    -- Pathfinding 
+    PATH_AGENT_RADIUS = 2, 
+    PATH_AGENT_HEIGHT = 5, 
+    PATH_WAYPOINT_SPACING = 4, 
+    PATH_BLOCKCAST_MARGIN = 0.5, 
+ 
+    -- Shake 
+    MIN_SHAKE_SPEED = 0.1, 
+    SHAKE_BASE_COOLDOWN = 0.3, 
+ 
+    -- Path options 
+    PATH_CAN_JUMP = true, 
+    PATH_CAN_CLIMB = true, 
+} 
+ 
+--================================================== 
+-- SETTINGS SAVE / LOAD 
+--================================================== 
+ 
+local SETTINGS_FILE = "CharlesAutoTool_Settings.json" 
+ 
+local function SaveSettings() 
+    if not writefile or not HttpService then 
+        return 
+    end 
+ 
+    local Success, Data = pcall(function() 
+        return HttpService:JSONEncode(SETTINGS) 
+    end) 
+ 
+    if Success then 
+        pcall(function() 
+            writefile(SETTINGS_FILE, Data) 
+        end) 
+    end 
+end 
+ 
+local function LoadSettings() 
+    if not readfile or not isfile or not HttpService then 
+        return 
+    end 
+ 
+    if not isfile(SETTINGS_FILE) then 
+        return 
+    end 
+ 
+    local Success, Data = pcall(function() 
+        return readfile(SETTINGS_FILE) 
+    end) 
+ 
+    if not Success then 
+        return 
+    end 
+ 
+    local DecodeSuccess, SavedSettings = 
+        pcall(function() 
+            return HttpService:JSONDecode(Data) 
+        end) 
+ 
+    if not DecodeSuccess 
+        or type(SavedSettings) ~= "table" 
+    then 
+        return 
+    end 
+ 
+    for Key, Value in pairs(SavedSettings) do 
+ 
+        if SETTINGS[Key] ~= nil 
+            and type(Value) == type(SETTINGS[Key]) 
+        then 
+            SETTINGS[Key] = Value 
+        end 
+    end 
+end 
+ 
+LoadSettings() 
+ 
+--================================================== 
+-- REMOTE REQUEST SAFETY LIMITER 
+--================================================== 
+ 
+local REQUEST_LIMITER = { 
+    MAX_REQUESTS_PER_SECOND = 50, 
+    WINDOW = 1, 
+    Requests = {} 
+} 
+ 
+local function CanSendRemote() 
+    local Now = os.clock() 
+    local Requests = REQUEST_LIMITER.Requests 
+ 
+    for i = #Requests, 1, -1 do 
+        if Now - Requests[i] >= REQUEST_LIMITER.WINDOW then 
+            table.remove(Requests, i) 
+        end 
+    end 
+ 
+    if #Requests >= REQUEST_LIMITER.MAX_REQUESTS_PER_SECOND then 
+        return false 
+    end 
+ 
+    table.insert(Requests, Now) 
+    return true 
+end 
+ 
+--================================================== 
+-- MOVEMENT 
+--================================================== 
+ 
+local MOVEMENT_MODES = { 
+    "Tween", 
+    "Path Tween", 
+    "Safe Tween" 
+} 
+ 
+local MovementMode = "Safe Tween" 
+ 
+--================================================== 
+-- STATE 
+--================================================== 
+ 
+local ScriptRunning = true 
+ 
+local AutoCollect = false 
+local AutoShake = false 
+local AutoSell = false 
+local AutoFarm = false 
+local FastPathEnabled = false 
+ 
+local CurrentPan = nil 
+local CurrentCollect = nil 
+local CurrentShake = nil 
+local CurrentPanRemote = nil 
+ 
+local AutoFarmThread = nil 
+local AutoCollectThread = nil 
+local AutoShakeThread = nil 
+local AutoSellThread = nil 
+local FastPathThread = nil 
+ 
+local Connections = {} 
+ 
+--================================================== 
+-- GUI 
+--================================================== 
+ 
+local ScreenGui = Instance.new("ScreenGui") 
+ScreenGui.Name = "CharlesAutoTool" 
+ScreenGui.ResetOnSpawn = false 
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling 
+ScreenGui.Parent = game:GetService("CoreGui") 
+ 
+local Main = Instance.new("Frame") 
+Main.Name = "Main" 
+Main.Size = UDim2.new(0, 650, 0, 500) 
+Main.Position = UDim2.new(0.5, -325, 0.5, -250) 
+Main.BackgroundColor3 = Color3.fromRGB(20, 20, 23) 
+Main.BorderSizePixel = 0 
+Main.Parent = ScreenGui 
+ 
+local MainCorner = Instance.new("UICorner") 
+MainCorner.CornerRadius = UDim.new(0, 8) 
+MainCorner.Parent = Main 
+ 
+--================================================== 
+-- TITLE 
+--================================================== 
+ 
+local TitleBar = Instance.new("Frame") 
+TitleBar.Size = UDim2.new(1, 0, 0, 42) 
+TitleBar.BackgroundColor3 = Color3.fromRGB(25, 25, 29) 
+TitleBar.BorderSizePixel = 0 
+TitleBar.Parent = Main 
+ 
+local Title = Instance.new("TextLabel") 
+Title.Size = UDim2.new(1, -60, 1, 0) 
+Title.Position = UDim2.new(0, 15, 0, 0) 
+Title.BackgroundTransparency = 1 
+Title.Text = "Charles's Auto Tool" 
+Title.TextColor3 = Color3.fromRGB(235, 235, 240) 
+Title.TextSize = 16 
+Title.Font = Enum.Font.GothamSemibold 
+Title.TextXAlignment = Enum.TextXAlignment.Left 
+Title.Parent = TitleBar 
+ 
+local CloseButton = Instance.new("ImageButton") 
+CloseButton.Size = UDim2.new(0, 28, 0, 28) 
+CloseButton.Position = UDim2.new(1, -34, 0, 7) 
+CloseButton.BackgroundTransparency = 1 
+CloseButton.Image = "rbxassetid://7072725342" 
+CloseButton.ImageColor3 = Color3.fromRGB(255, 255, 255) 
+CloseButton.Parent = TitleBar 
+ 
+--================================================== 
+-- SIDEBAR 
+--================================================== 
+ 
+local Sidebar = Instance.new("Frame") 
+Sidebar.Size = UDim2.new(0, 135, 1, -42) 
+Sidebar.Position = UDim2.new(0, 0, 0, 42) 
+Sidebar.BackgroundColor3 = Color3.fromRGB(23, 23, 27) 
+Sidebar.BorderSizePixel = 0 
+Sidebar.Parent = Main 
+ 
+local function CreateTabButton(Text, Y) 
+    local Button = Instance.new("TextButton") 
+ 
+    Button.Size = UDim2.new(1, -20, 0, 38) 
+    Button.Position = UDim2.new(0, 10, 0, Y) 
+    Button.BackgroundColor3 = Color3.fromRGB(30, 30, 35) 
+    Button.BorderSizePixel = 0 
+    Button.Text = Text 
+    Button.TextColor3 = Color3.fromRGB(210, 210, 215) 
+    Button.TextSize = 12 
+    Button.Font = Enum.Font.GothamMedium 
+    Button.Parent = Sidebar 
+ 
+    local Corner = Instance.new("UICorner") 
+    Corner.CornerRadius = UDim.new(0, 5) 
+    Corner.Parent = Button 
+ 
+    return Button 
+end 
+ 
+local HomeTab = CreateTabButton("Home", 12) 
+local LocationsTab = CreateTabButton("Locations", 58) 
+local MovementTab = CreateTabButton("Movement", 104) 
+local SettingsTab = CreateTabButton("Settings", 150) 
+ 
+--================================================== 
+-- CONTENT CONTAINERS 
+--================================================== 
+ 
+local function CreateContent() 
+    local Frame = Instance.new("Frame") 
+ 
+    Frame.Size = UDim2.new(1, -135, 1, -42) 
+    Frame.Position = UDim2.new(0, 135, 0, 42) 
+    Frame.BackgroundColor3 = Color3.fromRGB(20, 20, 23) 
+    Frame.BorderSizePixel = 0 
+    Frame.Visible = false 
+    Frame.Parent = Main 
+ 
+    return Frame 
+end 
+ 
+local HomeContent = CreateContent() 
+local LocationContent = CreateContent() 
+local MovementContent = CreateContent() 
+local SettingsContent = CreateContent() 
+ 
+HomeContent.Visible = true 
+ 
+--================================================== 
+-- TAB SWITCHING 
+--================================================== 
+ 
+local function ShowTab(Content, Button) 
+    HomeContent.Visible = false 
+    LocationContent.Visible = false 
+    MovementContent.Visible = false 
+    SettingsContent.Visible = false 
+ 
+    HomeTab.BackgroundColor3 = 
+        Color3.fromRGB(30, 30, 35) 
+ 
+    LocationsTab.BackgroundColor3 = 
+        Color3.fromRGB(30, 30, 35) 
+ 
+    MovementTab.BackgroundColor3 = 
+        Color3.fromRGB(30, 30, 35) 
+ 
+    SettingsTab.BackgroundColor3 = 
+        Color3.fromRGB(30, 30, 35) 
+ 
+    Content.Visible = true 
+ 
+    Button.BackgroundColor3 = 
+        Color3.fromRGB(40, 40, 46) 
+end 
+ 
+HomeTab.MouseButton1Click:Connect(function() 
+    ShowTab(HomeContent, HomeTab) 
+end) 
+ 
+LocationsTab.MouseButton1Click:Connect(function() 
+    ShowTab(LocationContent, LocationsTab) 
+end) 
+ 
+MovementTab.MouseButton1Click:Connect(function() 
+    ShowTab(MovementContent, MovementTab) 
+end) 
+ 
+SettingsTab.MouseButton1Click:Connect(function() 
+    ShowTab(SettingsContent, SettingsTab) 
+end) 
+ 
+--================================================== 
+-- HOME 
+--================================================== 
+ 
+local HomeTitle = Instance.new("TextLabel") 
+HomeTitle.Size = UDim2.new(1, -30, 0, 30) 
+HomeTitle.Position = UDim2.new(0, 15, 0, 10) 
+HomeTitle.BackgroundTransparency = 1 
+HomeTitle.Text = "Automation" 
+HomeTitle.TextColor3 = Color3.fromRGB(235, 235, 240) 
+HomeTitle.TextSize = 18 
+HomeTitle.Font = Enum.Font.GothamSemibold 
+HomeTitle.TextXAlignment = Enum.TextXAlignment.Left 
+HomeTitle.Parent = HomeContent 
+ 
+local PanStatus = Instance.new("TextLabel") 
+PanStatus.Size = UDim2.new(1, -30, 0, 22) 
+PanStatus.Position = UDim2.new(0, 15, 0, 48) 
+PanStatus.BackgroundTransparency = 1 
+PanStatus.Text = "Pan: Scanning..." 
+PanStatus.TextColor3 = Color3.fromRGB(180, 180, 185) 
+PanStatus.TextSize = 12 
+PanStatus.Font = Enum.Font.Gotham 
+PanStatus.TextXAlignment = Enum.TextXAlignment.Left 
+PanStatus.Parent = HomeContent 
+ 
+local SandStatus = Instance.new("TextLabel") 
+SandStatus.Size = UDim2.new(1, -30, 0, 22) 
+SandStatus.Position = UDim2.new(0, 15, 0, 72) 
+SandStatus.BackgroundTransparency = 1 
+SandStatus.Text = "Sand: 0 / 0" 
+SandStatus.TextColor3 = Color3.fromRGB(180, 180, 185) 
+SandStatus.TextSize = 12 
+SandStatus.Font = Enum.Font.Gotham 
+SandStatus.TextXAlignment = Enum.TextXAlignment.Left 
+SandStatus.Parent = HomeContent 
+ 
+local PathStatus = Instance.new("TextLabel") 
+PathStatus.Size = UDim2.new(1, -30, 0, 22) 
+PathStatus.Position = UDim2.new(0, 15, 0, 96) 
+PathStatus.BackgroundTransparency = 1 
+PathStatus.Text = "Geode: OFF" 
+PathStatus.TextColor3 = Color3.fromRGB(150, 150, 155) 
+PathStatus.TextSize = 12 
+PathStatus.Font = Enum.Font.Gotham 
+PathStatus.TextXAlignment = Enum.TextXAlignment.Left 
+PathStatus.Parent = HomeContent 
+ 
+local MovementStatus = Instance.new("TextLabel") 
+MovementStatus.Size = UDim2.new(1, -30, 0, 22) 
+MovementStatus.Position = UDim2.new(0, 15, 0, 120) 
+MovementStatus.BackgroundTransparency = 1 
+MovementStatus.Text = "Movement: Safe Tween" 
+MovementStatus.TextColor3 = Color3.fromRGB(150, 150, 155) 
+MovementStatus.TextSize = 12 
+MovementStatus.Font = Enum.Font.Gotham 
+MovementStatus.TextXAlignment = Enum.TextXAlignment.Left 
+MovementStatus.Parent = HomeContent 
+ 
+--================================================== 
+-- BUTTON CREATOR 
+--================================================== 
+ 
+local function CreateButton( 
+    Parent, 
+    Name, 
+    Text, 
+    Position, 
+    Width 
+) 
+    local Button = Instance.new("TextButton") 
+ 
+    Button.Name = Name 
+    Button.Size = UDim2.new( 
+        0, 
+        Width or 190, 
+        0, 
+        42 
+    ) 
+ 
+    Button.Position = Position 
+    Button.BackgroundColor3 = 
+        Color3.fromRGB(35, 35, 40) 
+ 
+    Button.BorderSizePixel = 0 
+    Button.Text = Text 
+    Button.TextColor3 = 
+        Color3.fromRGB(230, 230, 235) 
+ 
+    Button.TextSize = 12 
+    Button.Font = Enum.Font.GothamMedium 
+    Button.Parent = Parent 
+ 
+    local Corner = Instance.new("UICorner") 
+    Corner.CornerRadius = UDim.new(0, 5) 
+    Corner.Parent = Button 
+ 
+    return Button 
+end 
+ 
+--================================================== 
+-- HOME BUTTONS 
+--================================================== 
+ 
+local CollectButton = CreateButton( 
+    HomeContent, 
+    "CollectButton", 
+    "Collect", 
+    UDim2.new(0, 15, 0, 155), 
+    205 
+) 
+ 
+local AutoCollectButton = CreateButton( 
+    HomeContent, 
+    "AutoCollectButton", 
+    "Auto Collect: OFF", 
+    UDim2.new(0, 230, 0, 155), 
+    205 
+) 
+ 
+local AutoShakeButton = CreateButton( 
+    HomeContent, 
+    "AutoShakeButton", 
+    "Auto Shake: OFF", 
+    UDim2.new(0, 15, 0, 205), 
+    205 
+) 
+ 
+local AutoSellButton = CreateButton( 
+    HomeContent, 
+    "AutoSellButton", 
+    "Auto Sell: OFF", 
+    UDim2.new(0, 230, 0, 205), 
+    205 
+) 
+ 
+local AutoFarmButton = CreateButton( 
+    HomeContent, 
+    "AutoFarmButton", 
+    "Auto Farm: OFF", 
+    UDim2.new(0, 15, 0, 255), 
+    205 
+) 
+ 
+local FastPathButton = CreateButton( 
+    HomeContent, 
+    "FastPathButton", 
+    "Geode Path: OFF", 
+    UDim2.new(0, 230, 0, 255), 
+    205 
+) 
+ 
+--================================================== 
+-- LOCATION CONTENT 
+--================================================== 
+ 
+local LocationsTitle = Instance.new("TextLabel") 
+LocationsTitle.Size = UDim2.new(1, -30, 0, 30) 
+LocationsTitle.Position = UDim2.new(0, 15, 0, 10) 
+LocationsTitle.BackgroundTransparency = 1 
+LocationsTitle.Text = "Locations" 
+LocationsTitle.TextColor3 = 
+    Color3.fromRGB(235, 235, 240) 
+LocationsTitle.TextSize = 18 
+LocationsTitle.Font = Enum.Font.GothamSemibold 
+LocationsTitle.TextXAlignment = 
+    Enum.TextXAlignment.Left 
+LocationsTitle.Parent = LocationContent 
+ 
+local LOCATIONS = { 
+    { 
+        Name = "Level 1 - Basic", 
+        Sand = Vector3.new( 
+            -67.27998352050781, 
+            10.669769287109375, 
+            49.29251480102539 
+        ), 
+        Water = Vector3.new( 
+            -91.01200866699219, 
+            9, 
+            8.135207176208496 
+        ) 
+    }, 
+ 
+    { 
+        Name = "Level 2", 
+        Sand = Vector3.new( 
+            -133.70, 
+            13.00, 
+            35.17 
+        ), 
+        Water = Vector3.new( 
+            -97.41, 
+            9.00, 
+            42.51 
+        ) 
+    }, 
+ 
+    { 
+        Name = "Level 3", 
+        Sand = Vector3.new( 
+            -349.25, 
+            12.79, 
+            140.06 
+        ), 
+        Water = Vector3.new( 
+            -388.55, 
+            9.00, 
+            118.30 
+        ) 
+    } 
+} 
+ 
+local SelectedLocation = 1 
+ 
+--================================================== 
+-- CUSTOM LOCATION SAVE / LOAD 
+-- ADDED 
+--================================================== 
+ 
+local CUSTOM_LOCATIONS_FILE = 
+    "CharlesAutoTool_Locations.json" 
+ 
+local CustomLocations = {} 
+ 
+local function SaveCustomLocations() 
+ 
+    if not writefile 
+        or not HttpService 
+    then 
+        return 
+    end 
+ 
+    local DataToSave = {} 
+ 
+    for _, Location in ipairs(CustomLocations) do 
+ 
+        table.insert( 
+            DataToSave, 
+            { 
+                Name = Location.Name, 
+ 
+                Sand = { 
+                    X = Location.Sand.X, 
+                    Y = Location.Sand.Y, 
+                    Z = Location.Sand.Z 
+                }, 
+ 
+                Water = { 
+                    X = Location.Water.X, 
+                    Y = Location.Water.Y, 
+                    Z = Location.Water.Z 
+                } 
+            } 
+        ) 
+    end 
+ 
+    local Success, Data = 
+        pcall(function() 
+            return HttpService:JSONEncode( 
+                DataToSave 
+            ) 
+        end) 
+ 
+    if not Success then 
+        warn( 
+            "[Locations] Failed to encode locations." 
+        ) 
+ 
+        return 
+    end 
+ 
+    pcall(function() 
+        writefile( 
+            CUSTOM_LOCATIONS_FILE, 
+            Data 
+        ) 
+    end) 
+end 
+ 
+local function LoadCustomLocations() 
+ 
+    if not readfile 
+        or not isfile 
+        or not HttpService 
+    then 
+        return 
+    end 
+ 
+    if not isfile( 
+        CUSTOM_LOCATIONS_FILE 
+    ) then 
+        return 
+    end 
+ 
+    local Success, Data = 
+        pcall(function() 
+            return readfile( 
+                CUSTOM_LOCATIONS_FILE 
+            ) 
+        end) 
+ 
+    if not Success then 
+        return 
+    end 
+ 
+    local DecodeSuccess, SavedLocations = 
+        pcall(function() 
+            return HttpService:JSONDecode( 
+                Data 
+            ) 
+        end) 
+ 
+    if not DecodeSuccess 
+        or type(SavedLocations) ~= "table" 
+    then 
+        return 
+    end 
+ 
+    for _, SavedLocation in ipairs( 
+        SavedLocations 
+    ) do 
+ 
+        if type(SavedLocation) == "table" 
+            and type(SavedLocation.Name) == "string" 
+            and type(SavedLocation.Sand) == "table" 
+            and type(SavedLocation.Water) == "table" 
+        then 
+ 
+            local SX = tonumber( 
+                SavedLocation.Sand.X 
+            ) 
+ 
+            local SY = tonumber( 
+                SavedLocation.Sand.Y 
+            ) 
+ 
+            local SZ = tonumber( 
+                SavedLocation.Sand.Z 
+            ) 
+ 
+            local WX = tonumber( 
+                SavedLocation.Water.X 
+            ) 
+ 
+            local WY = tonumber( 
+                SavedLocation.Water.Y 
+            ) 
+ 
+            local WZ = tonumber( 
+                SavedLocation.Water.Z 
+            ) 
+ 
+            if SX 
+                and SY 
+                and SZ 
+                and WX 
+                and WY 
+                and WZ 
+            then 
+ 
+                local Location = { 
+                    Name = SavedLocation.Name, 
+                    Sand = Vector3.new( 
+                        SX, 
+                        SY, 
+                        SZ 
+                    ), 
+                    Water = Vector3.new( 
+                        WX, 
+                        WY, 
+                        WZ 
+                    ), 
+                    Custom = true 
+                } 
+ 
+                table.insert( 
+                    CustomLocations, 
+                    Location 
+                ) 
+ 
+                table.insert( 
+                    LOCATIONS, 
+                    Location 
+                ) 
+            end 
+        end 
+    end 
+end 
+ 
+LoadCustomLocations() 
+ 
+local LocationStatus = Instance.new("TextLabel") 
+LocationStatus.Size = UDim2.new(1, -30, 0, 30) 
+LocationStatus.Position = UDim2.new(0, 15, 0, 50) 
+LocationStatus.BackgroundTransparency = 1 
+LocationStatus.Text = "Selected: Level 1 - Basic" 
+LocationStatus.TextColor3 = 
+    Color3.fromRGB(180, 180, 185) 
+LocationStatus.TextSize = 13 
+LocationStatus.Font = Enum.Font.Gotham 
+LocationStatus.TextXAlignment = 
+    Enum.TextXAlignment.Left 
+LocationStatus.Parent = LocationContent 
+ 
+--================================================== 
+-- ORIGINAL LOCATION BUTTONS 
+--================================================== 
+ 
+for Index, Location in ipairs(LOCATIONS) do 
+ 
+    local Button = CreateButton( 
+        LocationContent, 
+        "Location" .. Index, 
+        Location.Name, 
+        UDim2.new( 
+            0, 
+            15, 
+            0, 
+            90 + ((Index - 1) * 52) 
+        ), 
+        420 
+    ) 
+ 
+    Button.MouseButton1Click:Connect( 
+        function() 
+ 
+            SelectedLocation = Index 
+ 
+            LocationStatus.Text = 
+                "Selected: " 
+                .. Location.Name 
+ 
+            print( 
+                "[Locations] Selected:", 
+                Location.Name 
+            ) 
+        end 
+    ) 
+end 
+ 
+--================================================== 
+-- CUSTOM LEVEL GUI SYSTEM 
+-- ADDED 
+--================================================== 
+ 
+local AddLevelButton = CreateButton( 
+    LocationContent, 
+    "AddLevelButton", 
+    "Add Level", 
+    UDim2.new( 
+        0, 
+        15, 
+        0, 
+        260 
+    ), 
+    200 
+) 
+ 
+local ManageLevelsButton = CreateButton( 
+    LocationContent, 
+    "ManageLevelsButton", 
+    "Manage Custom Levels", 
+    UDim2.new( 
+        0, 
+        225, 
+        0, 
+        260 
+    ), 
+    210 
+) 
+ 
+local LevelEditor = Instance.new("Frame") 
+LevelEditor.Name = "LevelEditor" 
+LevelEditor.Size = UDim2.new(0, 440, 0, 410) 
+LevelEditor.Position = UDim2.new(0.5, -220, 0.5, -205) 
+LevelEditor.BackgroundColor3 = Color3.fromRGB(27, 27, 32) 
+LevelEditor.BorderSizePixel = 0 
+LevelEditor.Visible = false 
+LevelEditor.ZIndex = 20 
+LevelEditor.Parent = Main 
+ 
+local LevelEditorCorner = Instance.new("UICorner") 
+LevelEditorCorner.CornerRadius = UDim.new(0, 8) 
+LevelEditorCorner.Parent = LevelEditor 
+ 
+local LevelEditorTitle = Instance.new("TextLabel") 
+LevelEditorTitle.Size = UDim2.new(1, -50, 0, 38) 
+LevelEditorTitle.Position = UDim2.new(0, 15, 0, 5) 
+LevelEditorTitle.BackgroundTransparency = 1 
+LevelEditorTitle.Text = "Add Custom Level" 
+LevelEditorTitle.TextColor3 = Color3.fromRGB(235, 235, 240) 
+LevelEditorTitle.TextSize = 16 
+LevelEditorTitle.Font = Enum.Font.GothamSemibold 
+LevelEditorTitle.TextXAlignment = Enum.TextXAlignment.Left 
+LevelEditorTitle.ZIndex = 21 
+LevelEditorTitle.Parent = LevelEditor 
+ 
+local LevelEditorClose = Instance.new("TextButton") 
+LevelEditorClose.Size = UDim2.new(0, 32, 0, 32) 
+LevelEditorClose.Position = UDim2.new(1, -40, 0, 8) 
+LevelEditorClose.BackgroundColor3 = Color3.fromRGB(40, 40, 46) 
+LevelEditorClose.BorderSizePixel = 0 
+LevelEditorClose.Text = "X" 
+LevelEditorClose.TextColor3 = Color3.fromRGB(230, 230, 235) 
+LevelEditorClose.TextSize = 12 
+LevelEditorClose.Font = Enum.Font.GothamBold 
+LevelEditorClose.ZIndex = 21 
+LevelEditorClose.Parent = LevelEditor 
+ 
+local LevelEditorCloseCorner = Instance.new("UICorner") 
+LevelEditorCloseCorner.CornerRadius = UDim.new(0, 5) 
+LevelEditorCloseCorner.Parent = LevelEditorClose 
+ 
+local function CreateLevelInput( 
+    Parent, 
+    Placeholder, 
+    Position, 
+    Width 
+) 
+ 
+    local Box = Instance.new("TextBox") 
+ 
+    Box.Size = UDim2.new( 
+        0, 
+        Width or 115, 
+        0, 
+        34 
+    ) 
+ 
+    Box.Position = Position 
+    Box.BackgroundColor3 = Color3.fromRGB(35, 35, 40) 
+    Box.BorderSizePixel = 0 
+    Box.PlaceholderText = Placeholder 
+    Box.PlaceholderColor3 = Color3.fromRGB(125, 125, 130) 
+    Box.Text = "" 
+    Box.TextColor3 = Color3.fromRGB(230, 230, 235) 
+    Box.TextSize = 11 
+    Box.Font = Enum.Font.Gotham 
+    Box.ClearTextOnFocus = false 
+    Box.ZIndex = 21 
+    Box.Parent = Parent 
+ 
+    local Corner = Instance.new("UICorner") 
+    Corner.CornerRadius = UDim.new(0, 5) 
+    Corner.Parent = Box 
+ 
+    return Box 
+end 
+ 
+local LevelNameBox = CreateLevelInput( 
+    LevelEditor, 
+    "Level Name", 
+    UDim2.new(0, 15, 0, 50), 
+    410 
+) 
+ 
+local SandLabel = Instance.new("TextLabel") 
+SandLabel.Size = UDim2.new(0, 200, 0, 24) 
+SandLabel.Position = UDim2.new(0, 15, 0, 95) 
+SandLabel.BackgroundTransparency = 1 
+SandLabel.Text = "Sand Coordinates" 
+SandLabel.TextColor3 = Color3.fromRGB(205, 205, 210) 
+SandLabel.TextSize = 12 
+SandLabel.Font = Enum.Font.GothamMedium 
+SandLabel.TextXAlignment = Enum.TextXAlignment.Left 
+SandLabel.ZIndex = 21 
+SandLabel.Parent = LevelEditor 
+ 
+local SandXBox = CreateLevelInput( 
+    LevelEditor, 
+    "X", 
+    UDim2.new(0, 15, 0, 122), 
+    125 
+) 
+ 
+local SandYBox = CreateLevelInput( 
+    LevelEditor, 
+    "Y", 
+    UDim2.new(0, 150, 0, 122), 
+    125 
+) 
+ 
+local SandZBox = CreateLevelInput( 
+    LevelEditor, 
+    "Z", 
+    UDim2.new(0, 285, 0, 122), 
+    125 
+) 
+ 
+local UseCurrentSandButton = CreateButton( 
+    LevelEditor, 
+    "UseCurrentSand", 
+    "Use Current Position", 
+    UDim2.new(0, 15, 0, 163), 
+    195 
+) 
+ 
+UseCurrentSandButton.ZIndex = 21 
+ 
+local WaterLabel = Instance.new("TextLabel") 
+WaterLabel.Size = UDim2.new(0, 200, 0, 24) 
+WaterLabel.Position = UDim2.new(0, 15, 0, 205) 
+WaterLabel.BackgroundTransparency = 1 
+WaterLabel.Text = "Water Coordinates" 
+WaterLabel.TextColor3 = Color3.fromRGB(205, 205, 210) 
+WaterLabel.TextSize = 12 
+WaterLabel.Font = Enum.Font.GothamMedium 
+WaterLabel.TextXAlignment = Enum.TextXAlignment.Left 
+WaterLabel.ZIndex = 21 
+WaterLabel.Parent = LevelEditor 
+ 
+local WaterXBox = CreateLevelInput( 
+    LevelEditor, 
+    "X", 
+    UDim2.new(0, 15, 0, 232), 
+    125 
+) 
+ 
+local WaterYBox = CreateLevelInput( 
+    LevelEditor, 
+    "Y", 
+    UDim2.new(0, 150, 0, 232), 
+    125 
+) 
+ 
+local WaterZBox = CreateLevelInput( 
+    LevelEditor, 
+    "Z", 
+    UDim2.new(0, 285, 0, 232), 
+    125 
+) 
+ 
+local UseCurrentWaterButton = CreateButton( 
+    LevelEditor, 
+    "UseCurrentWater", 
+    "Use Current Position", 
+    UDim2.new(0, 15, 0, 273), 
+    195 
+) 
+ 
+UseCurrentWaterButton.ZIndex = 21 
+ 
+local LevelEditorStatus = Instance.new("TextLabel") 
+LevelEditorStatus.Size = UDim2.new(1, -30, 0, 30) 
+LevelEditorStatus.Position = UDim2.new(0, 15, 0, 315) 
+LevelEditorStatus.BackgroundTransparency = 1 
+LevelEditorStatus.Text = "" 
+LevelEditorStatus.TextColor3 = Color3.fromRGB(180, 180, 185) 
+LevelEditorStatus.TextSize = 11 
+LevelEditorStatus.Font = Enum.Font.Gotham 
+LevelEditorStatus.TextXAlignment = Enum.TextXAlignment.Left 
+LevelEditorStatus.ZIndex = 21 
+LevelEditorStatus.Parent = LevelEditor 
+ 
+local SaveLevelButton = CreateButton( 
+    LevelEditor, 
+    "SaveLevel", 
+    "Add Level", 
+    UDim2.new(0, 15, 0, 350), 
+    195 
+) 
+ 
+SaveLevelButton.ZIndex = 21 
+ 
+local CancelLevelButton = CreateButton( 
+    LevelEditor, 
+    "CancelLevel", 
+    "Cancel", 
+    UDim2.new(0, 220, 0, 350), 
+    195 
+) 
+ 
+CancelLevelButton.ZIndex = 21 
+ 
+--================================================== 
+-- CUSTOM LEVEL MANAGER 
+-- ADDED 
+--================================================== 
+ 
+local LevelManager = Instance.new("Frame") 
+LevelManager.Name = "LevelManager" 
+LevelManager.Size = UDim2.new(0, 440, 0, 410) 
+LevelManager.Position = UDim2.new(0.5, -220, 0.5, -205) 
+LevelManager.BackgroundColor3 = Color3.fromRGB(27, 27, 32) 
+LevelManager.BorderSizePixel = 0 
+LevelManager.Visible = false 
+LevelManager.ZIndex = 20 
+LevelManager.Parent = Main 
+ 
+local LevelManagerCorner = Instance.new("UICorner") 
+LevelManagerCorner.CornerRadius = UDim.new(0, 8) 
+LevelManagerCorner.Parent = LevelManager 
+ 
+local LevelManagerTitle = Instance.new("TextLabel") 
+LevelManagerTitle.Size = UDim2.new(1, -50, 0, 38) 
+LevelManagerTitle.Position = UDim2.new(0, 15, 0, 5) 
+LevelManagerTitle.BackgroundTransparency = 1 
+LevelManagerTitle.Text = "Custom Levels" 
+LevelManagerTitle.TextColor3 = Color3.fromRGB(235, 235, 240) 
+LevelManagerTitle.TextSize = 16 
+LevelManagerTitle.Font = Enum.Font.GothamSemibold 
+LevelManagerTitle.TextXAlignment = Enum.TextXAlignment.Left 
+LevelManagerTitle.ZIndex = 21 
+LevelManagerTitle.Parent = LevelManager 
+ 
+local LevelManagerClose = Instance.new("TextButton") 
+LevelManagerClose.Size = UDim2.new(0, 32, 0, 32) 
+LevelManagerClose.Position = UDim2.new(1, -40, 0, 8) 
+LevelManagerClose.BackgroundColor3 = Color3.fromRGB(40, 40, 46) 
+LevelManagerClose.BorderSizePixel = 0 
+LevelManagerClose.Text = "X" 
+LevelManagerClose.TextColor3 = Color3.fromRGB(230, 230, 235) 
+LevelManagerClose.TextSize = 12 
+LevelManagerClose.Font = Enum.Font.GothamBold 
+LevelManagerClose.ZIndex = 21 
+LevelManagerClose.Parent = LevelManager 
+ 
+local LevelManagerCloseCorner = Instance.new("UICorner") 
+LevelManagerCloseCorner.CornerRadius = UDim.new(0, 5) 
+LevelManagerCloseCorner.Parent = LevelManagerClose 
+ 
+local CustomLevelScroll = Instance.new("ScrollingFrame") 
+CustomLevelScroll.Size = UDim2.new(1, -30, 0, 310) 
+CustomLevelScroll.Position = UDim2.new(0, 15, 0, 50) 
+CustomLevelScroll.BackgroundColor3 = Color3.fromRGB(23, 23, 27) 
+CustomLevelScroll.BorderSizePixel = 0 
+CustomLevelScroll.ScrollBarThickness = 5 
+CustomLevelScroll.CanvasSize = UDim2.new(0, 0, 0, 0) 
+CustomLevelScroll.ZIndex = 21 
+CustomLevelScroll.Parent = LevelManager 
+ 
+local CustomLevelLayout = Instance.new("UIListLayout") 
+CustomLevelLayout.Padding = UDim.new(0, 6) 
+CustomLevelLayout.Parent = CustomLevelScroll 
+ 
+local CustomLevelEmpty = Instance.new("TextLabel") 
+CustomLevelEmpty.Size = UDim2.new(1, -10, 0, 35) 
+CustomLevelEmpty.BackgroundTransparency = 1 
+CustomLevelEmpty.Text = "No custom levels have been added." 
+CustomLevelEmpty.TextColor3 = Color3.fromRGB(140, 140, 145) 
+CustomLevelEmpty.TextSize = 11 
+CustomLevelEmpty.Font = Enum.Font.Gotham 
+CustomLevelEmpty.ZIndex = 22 
+CustomLevelEmpty.Parent = CustomLevelScroll 
+ 
+local function SelectLocation(Index) 
+ 
+    if not LOCATIONS[Index] then 
+        return 
+    end 
+ 
+    SelectedLocation = Index 
+ 
+    LocationStatus.Text = 
+        "Selected: " 
+        .. LOCATIONS[Index].Name 
+ 
+    print( 
+        "[Locations] Selected:", 
+        LOCATIONS[Index].Name 
+    ) 
+end 
+ 
+local function RefreshCustomLevelManager() 
+ 
+    for _, Object in ipairs( 
+        CustomLevelScroll:GetChildren() 
+    ) do 
+ 
+        if Object:IsA("TextButton") then 
+            Object:Destroy() 
+        end 
+    end 
+ 
+    CustomLevelEmpty.Visible = 
+        #CustomLocations == 0 
+ 
+    for CustomIndex, Location in ipairs( 
+        CustomLocations 
+    ) do 
+ 
+        local Row = Instance.new("Frame") 
+        Row.Size = UDim2.new(1, -10, 0, 48) 
+        Row.BackgroundTransparency = 1 
+        Row.ZIndex = 22 
+        Row.Parent = CustomLevelScroll 
+ 
+        local SelectButton = Instance.new("TextButton") 
+        SelectButton.Size = UDim2.new(1, -75, 0, 42) 
+        SelectButton.Position = UDim2.new(0, 0, 0, 0) 
+        SelectButton.BackgroundColor3 = Color3.fromRGB(35, 35, 40) 
+        SelectButton.BorderSizePixel = 0 
+        SelectButton.Text = Location.Name 
+        SelectButton.TextColor3 = Color3.fromRGB(230, 230, 235) 
+        SelectButton.TextSize = 11 
+        SelectButton.Font = Enum.Font.GothamMedium 
+        SelectButton.TextXAlignment = Enum.TextXAlignment.Left 
+        SelectButton.ZIndex = 23 
+        SelectButton.Parent = Row 
+ 
+        local SelectPadding = Instance.new("UIPadding") 
+        SelectPadding.PaddingLeft = UDim.new(0, 10) 
+        SelectPadding.Parent = SelectButton 
+ 
+        local SelectCorner = Instance.new("UICorner") 
+        SelectCorner.CornerRadius = UDim.new(0, 5) 
+        SelectCorner.Parent = SelectButton 
+ 
+        SelectButton.MouseButton1Click:Connect( 
+            function() 
+ 
+                for Index, ExistingLocation in 
+                    ipairs(LOCATIONS) 
+                do 
+ 
+                    if ExistingLocation == Location then 
+                        SelectLocation(Index) 
+                        break 
+                    end 
+                end 
+ 
+                LevelManager.Visible = false 
+            end 
+        ) 
+ 
+        local DeleteButton = Instance.new("TextButton") 
+        DeleteButton.Size = UDim2.new(0, 65, 0, 42) 
+        DeleteButton.Position = UDim2.new(1, -65, 0, 0) 
+        DeleteButton.BackgroundColor3 = Color3.fromRGB(65, 35, 38) 
+        DeleteButton.BorderSizePixel = 0 
+        DeleteButton.Text = "Delete" 
+        DeleteButton.TextColor3 = Color3.fromRGB(235, 210, 210) 
+        DeleteButton.TextSize = 10 
+        DeleteButton.Font = Enum.Font.GothamMedium 
+        DeleteButton.ZIndex = 23 
+        DeleteButton.Parent = Row 
+ 
+        local DeleteCorner = Instance.new("UICorner") 
+        DeleteCorner.CornerRadius = UDim.new(0, 5) 
+        DeleteCorner.Parent = DeleteButton 
+ 
+        DeleteButton.MouseButton1Click:Connect( 
+            function() 
+ 
+                local ActualIndex = nil 
+ 
+                for Index, ExistingLocation in 
+                    ipairs(LOCATIONS) 
+                do 
+ 
+                    if ExistingLocation == Location then 
+                        ActualIndex = Index 
+                        break 
+                    end 
+                end 
+ 
+                if ActualIndex then 
+ 
+                    if SelectedLocation == ActualIndex then 
+                        SelectedLocation = 1 
+ 
+                        LocationStatus.Text = 
+                            "Selected: " 
+                            .. LOCATIONS[1].Name 
+                    elseif SelectedLocation > ActualIndex then 
+                        SelectedLocation -= 1 
+                    end 
+ 
+                    table.remove( 
+                        LOCATIONS, 
+                        ActualIndex 
+                    ) 
+                end 
+ 
+                table.remove( 
+                    CustomLocations, 
+                    CustomIndex 
+                ) 
+ 
+                SaveCustomLocations() 
+                RefreshCustomLevelManager() 
+ 
+                print( 
+                    "[Locations] Deleted:", 
+                    Location.Name 
+                ) 
+            end 
+        ) 
+    end 
+ 
+    task.defer(function() 
+ 
+        CustomLevelScroll.CanvasSize = 
+            UDim2.new( 
+                0, 
+                0, 
+                0, 
+                CustomLevelLayout.AbsoluteContentSize.Y 
+                    + 10 
+            ) 
+    end) 
+end 
+ 
+local function ClearLevelEditor() 
+ 
+    LevelNameBox.Text = "" 
+ 
+    SandXBox.Text = "" 
+    SandYBox.Text = "" 
+    SandZBox.Text = "" 
+ 
+    WaterXBox.Text = "" 
+    WaterYBox.Text = "" 
+    WaterZBox.Text = "" 
+ 
+    LevelEditorStatus.Text = "" 
+end 
+ 
+local function OpenLevelEditor() 
+ 
+    ClearLevelEditor() 
+ 
+    LevelEditor.Visible = true 
+    LevelManager.Visible = false 
+end 
+ 
+local function CloseLevelEditor() 
+ 
+    LevelEditor.Visible = false 
+end 
+ 
+local function GetCurrentPosition() 
+ 
+    local RootPart = 
+        LocalPlayer.Character 
+        and LocalPlayer.Character:FindFirstChild( 
+            "HumanoidRootPart" 
+        ) 
+ 
+    if not RootPart then 
+        return nil 
+    end 
+ 
+    return RootPart.Position 
+end 
+ 
+UseCurrentSandButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        local Position = GetCurrentPosition() 
+ 
+        if not Position then 
+ 
+            LevelEditorStatus.Text = 
+                "Could not find HumanoidRootPart." 
+ 
+            return 
+        end 
+ 
+        SandXBox.Text = 
+            string.format( 
+                "%.6f", 
+                Position.X 
+            ) 
+ 
+        SandYBox.Text = 
+            string.format( 
+                "%.6f", 
+                Position.Y 
+            ) 
+ 
+        SandZBox.Text = 
+            string.format( 
+                "%.6f", 
+                Position.Z 
+            ) 
+ 
+        LevelEditorStatus.Text = 
+            "Sand position filled from your current position." 
+    end 
+) 
+ 
+UseCurrentWaterButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        local Position = GetCurrentPosition() 
+ 
+        if not Position then 
+ 
+            LevelEditorStatus.Text = 
+                "Could not find HumanoidRootPart." 
+ 
+            return 
+        end 
+ 
+        WaterXBox.Text = 
+            string.format( 
+                "%.6f", 
+                Position.X 
+            ) 
+ 
+        WaterYBox.Text = 
+            string.format( 
+                "%.6f", 
+                Position.Y 
+            ) 
+ 
+        WaterZBox.Text = 
+            string.format( 
+                "%.6f", 
+                Position.Z 
+            ) 
+ 
+        LevelEditorStatus.Text = 
+            "Water position filled from your current position." 
+    end 
+) 
+ 
+SaveLevelButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        local Name = 
+            LevelNameBox.Text:gsub( 
+                "^%s*(.-)%s*$", 
+                "%1" 
+            ) 
+ 
+        if Name == "" then 
+ 
+            Name = 
+                "Level " 
+                .. tostring( 
+                    #LOCATIONS + 1 
+                ) 
+        end 
+ 
+        local SX = tonumber( 
+            SandXBox.Text 
+        ) 
+ 
+        local SY = tonumber( 
+            SandYBox.Text 
+        ) 
+ 
+        local SZ = tonumber( 
+            SandZBox.Text 
+        ) 
+ 
+        local WX = tonumber( 
+            WaterXBox.Text 
+        ) 
+ 
+        local WY = tonumber( 
+            WaterYBox.Text 
+        ) 
+ 
+        local WZ = tonumber( 
+            WaterZBox.Text 
+        ) 
+ 
+        if not SX 
+            or not SY 
+            or not SZ 
+            or not WX 
+            or not WY 
+            or not WZ 
+        then 
+ 
+            LevelEditorStatus.Text = 
+                "Enter valid numbers for all coordinates." 
+ 
+            return 
+        end 
+ 
+        local NewLocation = { 
+            Name = Name, 
+ 
+            Sand = Vector3.new( 
+                SX, 
+                SY, 
+                SZ 
+            ), 
+ 
+            Water = Vector3.new( 
+                WX, 
+                WY, 
+                WZ 
+            ), 
+ 
+            Custom = true 
+        } 
+ 
+        table.insert( 
+            CustomLocations, 
+            NewLocation 
+        ) 
+ 
+        table.insert( 
+            LOCATIONS, 
+            NewLocation 
+        ) 
+ 
+        SelectedLocation = 
+            #LOCATIONS 
+ 
+        LocationStatus.Text = 
+            "Selected: " 
+            .. NewLocation.Name 
+ 
+        SaveCustomLocations() 
+ 
+        print( 
+            "[Locations] Added:", 
+            NewLocation.Name 
+        ) 
+ 
+        print( 
+            "[Locations] Sand:", 
+            NewLocation.Sand 
+        ) 
+ 
+        print( 
+            "[Locations] Water:", 
+            NewLocation.Water 
+        ) 
+ 
+        LevelEditorStatus.Text = 
+            "Level added successfully." 
+ 
+        task.wait(0.5) 
+ 
+        CloseLevelEditor() 
+    end 
+) 
+ 
+CancelLevelButton.MouseButton1Click:Connect( 
+    function() 
+        CloseLevelEditor() 
+    end 
+) 
+ 
+LevelEditorClose.MouseButton1Click:Connect( 
+    function() 
+        CloseLevelEditor() 
+    end 
+) 
+ 
+ManageLevelsButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        RefreshCustomLevelManager() 
+ 
+        LevelManager.Visible = true 
+        LevelEditor.Visible = false 
+    end 
+) 
+ 
+LevelManagerClose.MouseButton1Click:Connect( 
+    function() 
+        LevelManager.Visible = false 
+    end 
+) 
+ 
+AddLevelButton.MouseButton1Click:Connect( 
+    function() 
+        OpenLevelEditor() 
+    end 
+) 
+ 
+--================================================== 
+-- MOVEMENT CONTENT 
+--================================================== 
+ 
+local MovementTitle = Instance.new("TextLabel") 
+MovementTitle.Size = UDim2.new(1, -30, 0, 30) 
+MovementTitle.Position = UDim2.new(0, 15, 0, 10) 
+MovementTitle.BackgroundTransparency = 1 
+MovementTitle.Text = "Movement" 
+MovementTitle.TextColor3 = 
+    Color3.fromRGB(235, 235, 240) 
+MovementTitle.TextSize = 18 
+MovementTitle.Font = Enum.Font.GothamSemibold 
+MovementTitle.TextXAlignment = 
+    Enum.TextXAlignment.Left 
+MovementTitle.Parent = MovementContent 
+ 
+local ModeLabel = Instance.new("TextLabel") 
+ModeLabel.Size = UDim2.new(0, 200, 0, 25) 
+ModeLabel.Position = UDim2.new(0, 15, 0, 55) 
+ModeLabel.BackgroundTransparency = 1 
+ModeLabel.Text = "Movement Mode" 
+ModeLabel.TextColor3 = 
+    Color3.fromRGB(200, 200, 205) 
+ModeLabel.TextSize = 12 
+ModeLabel.Font = Enum.Font.GothamMedium 
+ModeLabel.TextXAlignment = Enum.TextXAlignment.Left 
+ModeLabel.Parent = MovementContent 
+ 
+local ModeButton = CreateButton( 
+    MovementContent, 
+    "ModeButton", 
+    "Safe Tween", 
+    UDim2.new(0, 15, 0, 82), 
+    260 
+) 
+ 
+local ModeDescription = Instance.new("TextLabel") 
+ModeDescription.Size = UDim2.new(1, -30, 0, 65) 
+ModeDescription.Position = 
+    UDim2.new(0, 15, 0, 135) 
+ 
+ModeDescription.BackgroundTransparency = 1 
+ModeDescription.TextWrapped = true 
+ModeDescription.Text = 
+    "Checks the route and uses pathfinding to avoid obstacles before tweening between waypoints." 
+ModeDescription.TextColor3 = 
+    Color3.fromRGB(145, 145, 150) 
+ModeDescription.TextSize = 11 
+ModeDescription.Font = Enum.Font.Gotham 
+ModeDescription.TextXAlignment = Enum.TextXAlignment.Left 
+ModeDescription.TextYAlignment = Enum.TextYAlignment.Top 
+ModeDescription.Parent = MovementContent 
+ 
+local ModeIndex = 3 
+ 
+local function UpdateMovementDescription() 
+ 
+    if MovementMode == "Tween" then 
+ 
+        ModeDescription.Text = 
+            "Direct fast tween. This is the fastest mode, but it can pass through walls." 
+ 
+    elseif MovementMode == "Path Tween" then 
+ 
+        ModeDescription.Text = 
+            "Uses Roblox PathfindingService and tweens through its calculated waypoints." 
+ 
+    elseif MovementMode == "Safe Tween" then 
+ 
+        ModeDescription.Text = 
+            "Pathfinding movement with character-size Blockcast checks and route recalculation." 
+ 
+    end 
+ 
+    MovementStatus.Text = 
+        "Movement: " 
+        .. MovementMode 
+end 
+ 
+ModeButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        ModeIndex += 1 
+ 
+        if ModeIndex > #MOVEMENT_MODES then 
+            ModeIndex = 1 
+        end 
+ 
+        MovementMode = 
+            MOVEMENT_MODES[ModeIndex] 
+ 
+        ModeButton.Text = 
+            MovementMode 
+ 
+        UpdateMovementDescription() 
+    end 
+) 
+ 
+UpdateMovementDescription() 
+ 
+--================================================== 
+-- SETTINGS GUI 
+--================================================== 
+ 
+local SettingsTitle = Instance.new("TextLabel") 
+SettingsTitle.Size = UDim2.new(1, -30, 0, 30) 
+SettingsTitle.Position = UDim2.new(0, 15, 0, 10) 
+SettingsTitle.BackgroundTransparency = 1 
+SettingsTitle.Text = "Settings" 
+SettingsTitle.TextColor3 = Color3.fromRGB(235, 235, 240) 
+SettingsTitle.TextSize = 18 
+SettingsTitle.Font = Enum.Font.GothamSemibold 
+SettingsTitle.TextXAlignment = Enum.TextXAlignment.Left 
+SettingsTitle.Parent = SettingsContent 
+ 
+local SettingsScroll = Instance.new("ScrollingFrame") 
+SettingsScroll.Size = 
+    UDim2.new(1, -30, 1, -55) 
+ 
+SettingsScroll.Position = 
+    UDim2.new(0, 15, 0, 48) 
+ 
+SettingsScroll.BackgroundColor3 = 
+    Color3.fromRGB(24, 24, 28) 
+ 
+SettingsScroll.BorderSizePixel = 0 
+SettingsScroll.ScrollBarThickness = 5 
+SettingsScroll.CanvasSize = 
+    UDim2.new(0, 0, 0, 0) 
+ 
+SettingsScroll.Parent = SettingsContent 
+ 
+local SettingsLayout = 
+    Instance.new("UIListLayout") 
+ 
+SettingsLayout.Padding = 
+    UDim.new(0, 7) 
+ 
+SettingsLayout.Parent = 
+    SettingsScroll 
+ 
+--================================================== 
+-- SETTING CREATOR 
+--================================================== 
+ 
+local SettingInputs = {} 
+ 
+local function CreateSettingInput( 
+    Key, 
+    DisplayName 
+) 
+ 
+    local Holder = 
+        Instance.new("Frame") 
+ 
+    Holder.Size = 
+        UDim2.new( 
+            1, 
+            -10, 
+            0, 
+            42 
+        ) 
+ 
+    Holder.BackgroundTransparency = 1 
+    Holder.Parent = SettingsScroll 
+ 
+    local Label = 
+        Instance.new("TextLabel") 
+ 
+    Label.Size = 
+        UDim2.new( 
+            0.58, 
+            0, 
+            1, 
+            0 
+        ) 
+ 
+    Label.BackgroundTransparency = 1 
+    Label.Text = DisplayName 
+    Label.TextColor3 = 
+        Color3.fromRGB( 
+            205, 
+            205, 
+            210 
+        ) 
+ 
+    Label.TextSize = 11 
+    Label.Font = 
+        Enum.Font.Gotham 
+ 
+    Label.TextXAlignment = 
+        Enum.TextXAlignment.Left 
+ 
+    Label.Parent = Holder 
+ 
+    local Box = 
+        Instance.new("TextBox") 
+ 
+    Box.Size = 
+        UDim2.new( 
+            0.35, 
+            0, 
+            0, 
+            32 
+        ) 
+ 
+    Box.Position = 
+        UDim2.new( 
+            0.62, 
+            0, 
+            0.5, 
+            -16 
+        ) 
+ 
+    Box.BackgroundColor3 = 
+        Color3.fromRGB( 
+            35, 
+            35, 
+            40 
+        ) 
+ 
+    Box.BorderSizePixel = 0 
+ 
+    Box.Text = 
+        tostring( 
+            SETTINGS[Key] 
+        ) 
+ 
+    Box.TextColor3 = 
+        Color3.fromRGB( 
+            230, 
+            230, 
+            235 
+        ) 
+ 
+    Box.TextSize = 11 
+    Box.Font = Enum.Font.Gotham 
+ 
+    Box.ClearTextOnFocus = false 
+ 
+    Box.Parent = Holder 
+ 
+    local Corner = 
+        Instance.new("UICorner") 
+ 
+    Corner.CornerRadius = 
+        UDim.new(0, 5) 
+ 
+    Corner.Parent = Box 
+ 
+    SettingInputs[Key] = Box 
+ 
+    Box.FocusLost:Connect( 
+        function() 
+ 
+            local Number = 
+                tonumber(Box.Text) 
+ 
+            if Number ~= nil then 
+ 
+                SETTINGS[Key] = 
+                    Number 
+ 
+                Box.Text = 
+                    tostring(Number) 
+ 
+                SaveSettings() 
+ 
+                print( 
+                    "[Settings]", 
+                    Key, 
+                    "=", 
+                    Number 
+                ) 
+ 
+            else 
+ 
+                Box.Text = 
+                    tostring( 
+                        SETTINGS[Key] 
+                    ) 
+            end 
+        end 
+    ) 
+end 
+ 
+--================================================== 
+-- NUMERIC SETTINGS 
+--================================================== 
+ 
+CreateSettingInput( 
+    "PAN_SCAN_INTERVAL", 
+    "Pan Scan Interval" 
+) 
+ 
+CreateSettingInput( 
+    "AUTO_COLLECT_DELAY", 
+    "Auto Collect Delay" 
+) 
+ 
+CreateSettingInput( 
+    "AUTO_SELL_DELAY", 
+    "Auto Sell Delay" 
+) 
+ 
+CreateSettingInput( 
+    "TWEEN_SPEED", 
+    "Normal Tween Speed" 
+) 
+ 
+CreateSettingInput( 
+    "MIN_TWEEN_DURATION", 
+    "Minimum Tween Duration" 
+) 
+ 
+CreateSettingInput( 
+    "GROUND_CLEARANCE", 
+    "Ground Clearance" 
+) 
+ 
+CreateSettingInput( 
+    "GROUND_RAY_DISTANCE", 
+    "Ground Ray Distance" 
+) 
+ 
+CreateSettingInput( 
+    "TWEEN_SEGMENT_DISTANCE", 
+    "Tween Segment Distance" 
+) 
+ 
+CreateSettingInput( 
+    "MOVEMENT_TIMEOUT", 
+    "Movement Timeout" 
+) 
+ 
+CreateSettingInput( 
+    "POSITION_TOLERANCE", 
+    "Position Tolerance" 
+) 
+ 
+CreateSettingInput( 
+    "FAST_PATH_SPEED", 
+    "Geode Path Speed" 
+) 
+ 
+CreateSettingInput( 
+    "FAST_PATH_RESCAN_DELAY", 
+    "Geode Rescan Delay" 
+) 
+ 
+CreateSettingInput( 
+    "FAST_PATH_WAYPOINT_TIMEOUT", 
+    "Waypoint Timeout" 
+) 
+ 
+CreateSettingInput( 
+    "FAST_PATH_TARGET_TOLERANCE", 
+    "Target Tolerance" 
+) 
+ 
+CreateSettingInput( 
+    "PATH_AGENT_RADIUS", 
+    "Path Agent Radius" 
+) 
+ 
+CreateSettingInput( 
+    "PATH_AGENT_HEIGHT", 
+    "Path Agent Height" 
+) 
+ 
+CreateSettingInput( 
+    "PATH_WAYPOINT_SPACING", 
+    "Path Waypoint Spacing" 
+) 
+ 
+CreateSettingInput( 
+    "PATH_BLOCKCAST_MARGIN", 
+    "Path Blockcast Margin" 
+) 
+ 
+CreateSettingInput( 
+    "MIN_SHAKE_SPEED", 
+    "Minimum Shake Speed" 
+) 
+ 
+CreateSettingInput( 
+    "SHAKE_BASE_COOLDOWN", 
+    "Shake Base Cooldown" 
+) 
+ 
+SettingsLayout:GetPropertyChangedSignal( 
+    "AbsoluteContentSize" 
+):Connect( 
+    function() 
+ 
+        SettingsScroll.CanvasSize = 
+            UDim2.new( 
+                0, 
+                0, 
+                0, 
+                SettingsLayout.AbsoluteContentSize.Y 
+                    + 10 
+            ) 
+    end 
+) 
+ 
+--================================================== 
+-- BOOLEAN SETTING BUTTONS 
+--================================================== 
+ 
+local function CreateBooleanSetting( 
+    DisplayName, 
+    Key 
+) 
+ 
+    local Holder = 
+        Instance.new("Frame") 
+ 
+    Holder.Size = 
+        UDim2.new( 
+            1, 
+            -10, 
+            0, 
+            42 
+        ) 
+ 
+    Holder.BackgroundTransparency = 1 
+    Holder.Parent = SettingsScroll 
+ 
+    local Label = 
+        Instance.new("TextLabel") 
+ 
+    Label.Size = 
+        UDim2.new( 
+            0.58, 
+            0, 
+            1, 
+            0 
+        ) 
+ 
+    Label.BackgroundTransparency = 1 
+    Label.Text = DisplayName 
+    Label.TextColor3 = 
+        Color3.fromRGB( 
+            205, 
+            205, 
+            210 
+        ) 
+ 
+    Label.TextSize = 11 
+    Label.Font = 
+        Enum.Font.Gotham 
+ 
+    Label.TextXAlignment = 
+        Enum.TextXAlignment.Left 
+ 
+    Label.Parent = Holder 
+ 
+    local Button = 
+        Instance.new("TextButton") 
+ 
+    Button.Size = 
+        UDim2.new( 
+            0.35, 
+            0, 
+            0, 
+            32 
+        ) 
+ 
+    Button.Position = 
+        UDim2.new( 
+            0.62, 
+            0, 
+            0.5, 
+            -16 
+        ) 
+ 
+    Button.BackgroundColor3 = 
+        Color3.fromRGB( 
+            35, 
+            35, 
+            40 
+        ) 
+ 
+    Button.BorderSizePixel = 0 
+ 
+    Button.TextSize = 11 
+    Button.Font = 
+        Enum.Font.GothamMedium 
+ 
+    Button.Parent = Holder 
+ 
+    local Corner = 
+        Instance.new("UICorner") 
+ 
+    Corner.CornerRadius = 
+        UDim.new(0, 5) 
+ 
+    Corner.Parent = Button 
+ 
+    local function Update() 
+ 
+        if SETTINGS[Key] then 
+ 
+            Button.Text = "ON" 
+ 
+            Button.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    70, 
+                    130, 
+                    80 
+                ) 
+ 
+        else 
+ 
+            Button.Text = "OFF" 
+ 
+            Button.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    35, 
+                    35, 
+                    40 
+                ) 
+        end 
+    end 
+ 
+    Button.MouseButton1Click:Connect( 
+        function() 
+ 
+            SETTINGS[Key] = 
+                not SETTINGS[Key] 
+ 
+            Update() 
+        end 
+    ) 
+ 
+    Update() 
+end 
+ 
+CreateBooleanSetting( 
+    "Path Can Jump", 
+    "PATH_CAN_JUMP" 
+) 
+ 
+CreateBooleanSetting( 
+    "Path Can Climb", 
+    "PATH_CAN_CLIMB" 
+) 
+ 
+--================================================== 
+-- PAN SCANNER 
+--================================================== 
+ 
+local function ScanForPan() 
+ 
+    if not ScriptRunning then 
+        return 
+    end 
+ 
+    local Character = 
+        LocalPlayer.Character 
+ 
+    if not Character then 
+ 
+        CurrentPan = nil 
+        CurrentCollect = nil 
+        CurrentShake = nil 
+        CurrentPanRemote = nil 
+ 
+        PanStatus.Text = 
+            "Pan: None equipped" 
+ 
+        return 
+    end 
+ 
+    local FoundPan = nil 
+    local FoundCollect = nil 
+    local FoundShake = nil 
+    local FoundPanRemote = nil 
+ 
+    for _, Object in ipairs( 
+        Character:GetChildren() 
+    ) do 
+ 
+        if Object:IsA("Tool") then 
+ 
+            local Scripts = 
+                Object:FindFirstChild( 
+                    "Scripts" 
+                ) 
+ 
+            if Scripts then 
+ 
+                local Collect = 
+                    Scripts:FindFirstChild( 
+                        "Collect" 
+                    ) 
+ 
+                local Shake = 
+                    Scripts:FindFirstChild( 
+                        "Shake" 
+                    ) 
+ 
+                local Pan = 
+                    Scripts:FindFirstChild( 
+                        "Pan" 
+                    ) 
+ 
+                if Collect 
+                    or Shake 
+                    or Pan 
+                then 
+ 
+                    FoundPan = Object 
+ 
+                    if Collect 
+                        and Collect:IsA( 
+                            "RemoteFunction" 
+                        ) 
+                    then 
+                        FoundCollect = 
+                            Collect 
+                    end 
+ 
+                    if Shake 
+                        and Shake:IsA( 
+                            "RemoteEvent" 
+                        ) 
+                    then 
+                        FoundShake = 
+                            Shake 
+                    end 
+ 
+                    if Pan 
+                        and Pan:IsA( 
+                            "RemoteFunction" 
+                        ) 
+                    then 
+                        FoundPanRemote = 
+                            Pan 
+                    end 
+ 
+                    break 
+                end 
+            end 
+        end 
+    end 
+ 
+    CurrentPan = FoundPan 
+    CurrentCollect = FoundCollect 
+    CurrentShake = FoundShake 
+    CurrentPanRemote = FoundPanRemote 
+ 
+    if CurrentPan then 
+ 
+        PanStatus.Text = 
+            "Pan: " 
+            .. CurrentPan.Name 
+ 
+        PanStatus.TextColor3 = 
+            Color3.fromRGB( 
+                180, 
+                180, 
+                185 
+            ) 
+ 
+    else 
+ 
+        PanStatus.Text = 
+            "Pan: None equipped" 
+ 
+        PanStatus.TextColor3 = 
+            Color3.fromRGB( 
+                150, 
+                100, 
+                100 
+            ) 
+    end 
+end 
+ 
+--================================================== 
+-- SAND 
+--================================================== 
+ 
+local function GetSand() 
+ 
+    local Pan = 
+        CurrentPan 
+ 
+    if not Pan 
+        or not Pan.Parent 
+    then 
+ 
+        ScanForPan() 
+ 
+        Pan = 
+            CurrentPan 
+    end 
+ 
+    if not Pan then 
+        return 0, 0 
+    end 
+ 
+    local Fill = 
+        Pan:GetAttribute( 
+            "Fill" 
+        ) or 0 
+ 
+    local Stats = 
+        LocalPlayer:FindFirstChild( 
+            "Stats" 
+        ) 
+ 
+    if not Stats then 
+        return Fill, 0 
+    end 
+ 
+    local Capacity = 
+        Stats:GetAttribute( 
+            "Capacity" 
+        ) or 0 
+ 
+    return Fill, Capacity 
+end 
+ 
+local function UpdateSandDisplay() 
+ 
+    if not ScriptRunning then 
+        return 
+    end 
+ 
+    local Fill, Capacity = 
+        GetSand() 
+ 
+    SandStatus.Text = 
+        "Sand: " 
+        .. tostring( 
+            math.floor(Fill) 
+        ) 
+        .. " / " 
+        .. tostring( 
+            math.floor(Capacity) 
+        ) 
+end 
+ 
+--================================================== 
+-- COLLECT 
+--================================================== 
+ 
+local function Collect() 
+ 
+    if not ScriptRunning then 
+        return 
+    end 
+ 
+    if not CurrentPan 
+        or not CurrentPan.Parent 
+    then 
+        ScanForPan() 
+    end 
+ 
+    if not CurrentCollect then 
+        warn( 
+            "[Collect] Collect RemoteFunction not found." 
+        ) 
+        return 
+    end 
+ 
+    if not CanSendRemote() then 
+        return 
+    end 
+ 
+    local Args = { 
+        1.00000000000000000, 
+        false 
+    } 
+ 
+    local Success, Error = 
+        pcall(function() 
+            CurrentCollect: 
+                InvokeServer( 
+                    unpack(Args) 
+                ) 
+        end) 
+ 
+    if not Success then 
+        warn( 
+            "[Collect] Error:", 
+            Error 
+        ) 
+    end 
+end 
+ 
+--================================================== 
+-- SHAKE 
+--================================================== 
+ 
+local function ShakePan() 
+ 
+    if not ScriptRunning then 
+        return 
+    end 
+ 
+    if not CurrentPan 
+        or not CurrentPan.Parent 
+    then 
+        ScanForPan() 
+    end 
+ 
+    if not CurrentShake then 
+ 
+        warn( 
+            "[Shake] Shake RemoteEvent not found." 
+        ) 
+ 
+        return 
+    end 
+ 
+    pcall(function() 
+        CurrentShake:FireServer() 
+    end) 
+end 
+ 
+local function GetShakeSpeed() 
+ 
+    local Stats = 
+        LocalPlayer:FindFirstChild( 
+            "Stats" 
+        ) 
+ 
+    if not Stats then 
+        return 1 
+    end 
+ 
+    local ShakeSpeed = 
+        Stats:GetAttribute( 
+            "ShakeSpeed" 
+        ) 
+ 
+    if typeof(ShakeSpeed) 
+        ~= "number" 
+    then 
+        ShakeSpeed = 1 
+    end 
+ 
+    return math.max( 
+        ShakeSpeed, 
+        SETTINGS.MIN_SHAKE_SPEED 
+    ) 
+end 
+ 
+local function GetShakeCooldown() 
+ 
+    return SETTINGS.SHAKE_BASE_COOLDOWN 
+        / GetShakeSpeed() 
+end 
+ 
+--================================================== 
+-- WATER PAN 
+--================================================== 
+ 
+local function StartWaterPan() 
+ 
+    if not ScriptRunning then 
+        return false 
+    end 
+ 
+    ScanForPan() 
+ 
+    if not CurrentPan then 
+        return false 
+    end 
+ 
+    local Scripts = 
+        CurrentPan:FindFirstChild( 
+            "Scripts" 
+        ) 
+ 
+    if not Scripts then 
+        return false 
+    end 
+ 
+    local PanRemote = 
+        Scripts:FindFirstChild( 
+            "Pan" 
+        ) 
+ 
+    if not PanRemote then 
+        return false 
+    end 
+ 
+    if not PanRemote:IsA( 
+        "RemoteFunction" 
+    ) then 
+        return false 
+    end 
+ 
+    CurrentPanRemote = 
+        PanRemote 
+ 
+    local Character = 
+        LocalPlayer.Character 
+ 
+    if not Character then 
+        return false 
+    end 
+ 
+    local Success, Result = 
+        pcall(function() 
+ 
+            return PanRemote: 
+                InvokeServer() 
+        end) 
+ 
+    if not Success then 
+ 
+        warn( 
+            "[Pan] InvokeServer error:", 
+            Result 
+        ) 
+ 
+        return false 
+    end 
+ 
+    if Result ~= true then 
+        return false 
+    end 
+ 
+    local Timeout = 
+        os.clock() + 5 
+ 
+    while 
+        ScriptRunning 
+        and (AutoFarm or AutoShake) 
+        and os.clock() < Timeout 
+    do 
+ 
+        if Character:GetAttribute( 
+            "Panning" 
+        ) == true 
+        then 
+            return true 
+        end 
+ 
+        task.wait(0.05) 
+    end 
+ 
+    return false 
+end 
+ 
+--================================================== 
+-- FIRE SHAKE 
+--================================================== 
+ 
+local function FireShake() 
+ 
+    if not ScriptRunning then 
+        return false 
+    end 
+ 
+    if not CurrentShake 
+        or not CurrentShake.Parent 
+    then 
+        ScanForPan() 
+    end 
+ 
+    if not CurrentShake then 
+        return false 
+    end 
+ 
+    if not CanSendRemote() then 
+        return false 
+    end 
+ 
+    local Success = 
+        pcall(function() 
+            CurrentShake:FireServer() 
+        end) 
+ 
+    return Success 
+end 
+ 
+--================================================== 
+-- SHAKE WHILE PANNING 
+--================================================== 
+ 
+local function ShakeWhilePanning() 
+ 
+    if not ScriptRunning then 
+        return false 
+    end 
+ 
+    local Character = 
+        LocalPlayer.Character 
+ 
+    if not Character then 
+        return false 
+    end 
+ 
+    ScanForPan() 
+ 
+    if not CurrentShake then 
+        return false 
+    end 
+ 
+    local NextShakeTime = 
+        os.clock() 
+ 
+    while 
+        ScriptRunning 
+        and (AutoFarm or AutoShake) 
+        and Character:GetAttribute( 
+            "Panning" 
+        ) == true 
+    do 
+ 
+        if not CurrentShake 
+            or not CurrentShake.Parent 
+        then 
+            ScanForPan() 
+ 
+            if not CurrentShake then 
+                return false 
+            end 
+        end 
+ 
+        local Now = 
+            os.clock() 
+ 
+        if Now >= NextShakeTime then 
+ 
+            FireShake() 
+ 
+            NextShakeTime = 
+                Now 
+                + GetShakeCooldown() 
+ 
+        else 
+ 
+            local Remaining = 
+                NextShakeTime - Now 
+ 
+            if Remaining > 0 then 
+                task.wait(Remaining) 
+            end 
+        end 
+    end 
+ 
+    return true 
+end 
+ 
+--================================================== 
+-- SELL 
+--================================================== 
+ 
+local GetInventorySellPrice 
+local SellEvent 
+ 
+pcall(function() 
+ 
+    local Remotes = 
+        ReplicatedStorage: 
+            WaitForChild( 
+                "Remotes" 
+            ) 
+ 
+    local Shop = 
+        Remotes: 
+            WaitForChild( 
+                "Shop" 
+            ) 
+ 
+    GetInventorySellPrice = 
+        Shop: 
+            WaitForChild( 
+                "GetInventorySellPrice" 
+            ) 
+ 
+    SellEvent = 
+        Shop: 
+            WaitForChild( 
+                "SellAll" 
+            ) 
+end) 
+ 
+local function SellAll() 
+ 
+    if not ScriptRunning then 
+        return 
+    end 
+ 
+    if GetInventorySellPrice 
+        and GetInventorySellPrice.Parent 
+    then 
+ 
+        pcall(function() 
+ 
+            if GetInventorySellPrice:IsA( 
+                "RemoteFunction" 
+            ) then 
+ 
+                GetInventorySellPrice: 
+                    InvokeServer() 
+ 
+            elseif GetInventorySellPrice:IsA( 
+                "RemoteEvent" 
+            ) then 
+ 
+                GetInventorySellPrice: 
+                    FireServer() 
+            end 
+        end) 
+    end 
+ 
+    task.wait(0.1) 
+ 
+    if SellEvent 
+        and SellEvent.Parent 
+    then 
+ 
+        pcall(function() 
+ 
+            if SellEvent:IsA( 
+                "RemoteEvent" 
+            ) then 
+ 
+                SellEvent:FireServer() 
+ 
+            elseif SellEvent:IsA( 
+                "RemoteFunction" 
+            ) then 
+ 
+                SellEvent:InvokeServer() 
+            end 
+        end) 
+    end 
+end 
+ 
+--================================================== 
+-- CHARACTER 
+--================================================== 
+ 
+local function GetCharacter() 
+ 
+    local Character = 
+        LocalPlayer.Character 
+ 
+    if not Character 
+        or not Character.Parent 
+    then 
+        return nil 
+    end 
+ 
+    return Character 
+end 
+ 
+local function GetRootPart() 
+ 
+    local Character = 
+        GetCharacter() 
+ 
+    if not Character then 
+        return nil, nil 
+    end 
+ 
+    local RootPart = 
+        Character:FindFirstChild( 
+            "HumanoidRootPart" 
+        ) 
+ 
+    return RootPart, Character 
+end 
+ 
+--================================================== 
+-- RAYCAST 
+--================================================== 
+ 
+local function GetRayParams( 
+    Character, 
+    Target 
+) 
+ 
+    local Params = 
+        RaycastParams.new() 
+ 
+    Params.FilterType = 
+        Enum.RaycastFilterType.Exclude 
+ 
+    local Ignore = { 
+        Character 
+    } 
+ 
+    if Target then 
+        table.insert( 
+            Ignore, 
+            Target 
+        ) 
+    end 
+ 
+    Params.FilterDescendantsInstances = 
+        Ignore 
+ 
+    Params.IgnoreWater = false 
+ 
+    return Params 
+end 
+ 
+local function IsSegmentClear( 
+    StartPosition, 
+    EndPosition, 
+    Character, 
+    Target 
+) 
+ 
+    local Direction = 
+        EndPosition 
+        - StartPosition 
+ 
+    if Direction.Magnitude <= 0.05 then 
+        return true 
+    end 
+ 
+    local RootPart = 
+        Character 
+        and Character:FindFirstChild( 
+            "HumanoidRootPart" 
+        ) 
+ 
+    if not RootPart then 
+        return false 
+    end 
+ 
+    local Margin = 
+        math.max( 
+            SETTINGS.PATH_BLOCKCAST_MARGIN, 
+            0 
+        ) 
+ 
+    local CastSize = 
+        RootPart.Size 
+        + Vector3.new( 
+            Margin, 
+            Margin, 
+            Margin 
+        ) 
+ 
+    local Result = 
+        Workspace:Blockcast( 
+            CFrame.new( 
+                StartPosition 
+            ), 
+            CastSize, 
+            Direction, 
+            GetRayParams( 
+                Character, 
+                Target 
+            ) 
+        ) 
+ 
+    if Result then 
+        return false 
+    end 
+ 
+    return true 
+end 
+ 
+--================================================== 
+-- GROUND 
+--================================================== 
+ 
+local function GetGroundY( 
+    Position, 
+    Character 
+) 
+ 
+    local Params = 
+        GetRayParams( 
+            Character 
+        ) 
+ 
+    local Origin = 
+        Position 
+        + Vector3.new( 
+            0, 
+            6, 
+            0 
+        ) 
+ 
+    local Direction = 
+        Vector3.new( 
+            0, 
+            -SETTINGS.GROUND_RAY_DISTANCE, 
+            0 
+        ) 
+ 
+    local Result = 
+        Workspace:Raycast( 
+            Origin, 
+            Direction, 
+            Params 
+        ) 
+ 
+    if Result then 
+        return Result.Position.Y 
+    end 
+ 
+    return nil 
+end 
+ 
+local function GetSafeHeight( 
+    Position, 
+    Character 
+) 
+ 
+    local GroundY = 
+        GetGroundY( 
+            Position, 
+            Character 
+        ) 
+ 
+    if not GroundY then 
+        return Position.Y 
+    end 
+ 
+    local Humanoid = 
+        Character:FindFirstChildOfClass( 
+            "Humanoid" 
+        ) 
+ 
+    local RootPart = 
+        Character:FindFirstChild( 
+            "HumanoidRootPart" 
+        ) 
+ 
+    local Height = 
+        SETTINGS.GROUND_CLEARANCE 
+ 
+    if Humanoid 
+        and RootPart 
+    then 
+ 
+        Height = 
+            math.max( 
+                SETTINGS.GROUND_CLEARANCE, 
+                Humanoid.HipHeight 
+                    + RootPart.Size.Y / 2 
+            ) 
+    end 
+ 
+    return math.max( 
+        Position.Y, 
+        GroundY + Height 
+    ) 
+end 
+ 
+--================================================== 
+-- DIRECT TWEEN 
+--================================================== 
+ 
+local function DirectTween( 
+    TargetPosition, 
+    Speed, 
+    Target 
+) 
+ 
+    local RootPart, Character = 
+        GetRootPart() 
+ 
+    if not RootPart then 
+        return false 
+    end 
+ 
+    local Distance = 
+        ( 
+            RootPart.Position 
+            - TargetPosition 
+        ).Magnitude 
+ 
+    if Distance <= 
+        SETTINGS.POSITION_TOLERANCE 
+    then 
+        return true 
+    end 
+ 
+    local Duration = 
+        math.max( 
+            Distance / Speed, 
+            SETTINGS.MIN_TWEEN_DURATION 
+        ) 
+ 
+    local Tween = 
+        TweenService:Create( 
+ 
+            RootPart, 
+ 
+            TweenInfo.new( 
+                Duration, 
+                Enum.EasingStyle.Linear 
+            ), 
+ 
+            { 
+                CFrame = 
+                    CFrame.new( 
+                        TargetPosition 
+                    ) 
+            } 
+        ) 
+ 
+    local Finished = false 
+ 
+    local Connection = 
+        Tween.Completed:Connect( 
+            function() 
+                Finished = true 
+            end 
+        ) 
+ 
+    Tween:Play() 
+ 
+    local Timeout = 
+        os.clock() 
+        + math.max( 
+            SETTINGS.MOVEMENT_TIMEOUT, 
+            Duration + 2 
+        ) 
+ 
+    while 
+        ScriptRunning 
+        and not Finished 
+        and os.clock() < Timeout 
+    do 
+ 
+        if not RootPart.Parent then 
+            Tween:Cancel() 
+            break 
+        end 
+ 
+        task.wait() 
+    end 
+ 
+    if not Finished then 
+        Tween:Cancel() 
+    end 
+ 
+    Connection:Disconnect() 
+ 
+    return ( 
+        RootPart.Position 
+        - TargetPosition 
+    ).Magnitude 
+        <= math.max( 
+            SETTINGS.POSITION_TOLERANCE, 
+            2 
+        ) 
+end 
+ 
+--================================================== 
+-- PATH CREATION 
+--================================================== 
+ 
+local function CreatePath( 
+    StartPosition, 
+    TargetPosition 
+) 
+ 
+    local Path = 
+        PathfindingService:CreatePath({ 
+ 
+            AgentRadius = 
+                SETTINGS.PATH_AGENT_RADIUS, 
+ 
+            AgentHeight = 
+                SETTINGS.PATH_AGENT_HEIGHT, 
+ 
+            AgentCanJump = 
+                SETTINGS.PATH_CAN_JUMP, 
+ 
+            AgentCanClimb = 
+                SETTINGS.PATH_CAN_CLIMB, 
+ 
+            WaypointSpacing = 
+                SETTINGS.PATH_WAYPOINT_SPACING 
+        }) 
+ 
+    local Success = 
+        pcall(function() 
+ 
+            Path:ComputeAsync( 
+                StartPosition, 
+                TargetPosition 
+            ) 
+        end) 
+ 
+    if not Success then 
+        return nil 
+    end 
+ 
+    if Path.Status ~= 
+        Enum.PathStatus.Success 
+    then 
+        return nil 
+    end 
+ 
+    return Path 
+end 
+ 
+--================================================== 
+-- PATH TWEEN 
+--================================================== 
+ 
+local function FollowPath( 
+    TargetPosition, 
+    Target, 
+    SafeMode 
+) 
+ 
+    local RootPart, Character = 
+        GetRootPart() 
+ 
+    if not RootPart then 
+        return false 
+    end 
+ 
+    local RepathCount = 0 
+    local MaxRepaths = 6 
+ 
+    while ScriptRunning do 
+ 
+        if Target 
+            and not Target.Parent 
+        then 
+            return false 
+        end 
+ 
+        local CurrentRoot, 
+            CurrentCharacter = 
+            GetRootPart() 
+ 
+        if not CurrentRoot then 
+            return false 
+        end 
+ 
+        RootPart = 
+            CurrentRoot 
+ 
+        Character = 
+            CurrentCharacter 
+ 
+        local Path = 
+            CreatePath( 
+                RootPart.Position, 
+                TargetPosition 
+            ) 
+ 
+        if not Path then 
+            return false 
+        end 
+ 
+        local Waypoints = 
+            Path:GetWaypoints() 
+ 
+        if #Waypoints == 0 then 
+            return false 
+        end 
+ 
+        local NeedRepath = false 
+ 
+        for Index, Waypoint in ipairs( 
+            Waypoints 
+        ) do 
+ 
+            if not ScriptRunning then 
+                return false 
+            end 
+ 
+            if Target 
+                and not Target.Parent 
+            then 
+                return false 
+            end 
+ 
+            local CurrentRoot, 
+                CurrentCharacter = 
+                GetRootPart() 
+ 
+            if not CurrentRoot then 
+                return false 
+            end 
+ 
+            RootPart = 
+                CurrentRoot 
+ 
+            Character = 
+                CurrentCharacter 
+ 
+            local WaypointPosition = 
+                Waypoint.Position 
+ 
+            if ( 
+                RootPart.Position 
+                - WaypointPosition 
+            ).Magnitude 
+                <= SETTINGS.POSITION_TOLERANCE 
+            then 
+                continue 
+            end 
+ 
+            if SafeMode then 
+ 
+                local Clear = 
+                    IsSegmentClear( 
+                        RootPart.Position, 
+                        WaypointPosition, 
+                        Character, 
+                        Target 
+                    ) 
+ 
+                if not Clear then 
+ 
+                    NeedRepath = true 
+                    break 
+                end 
+            end 
+ 
+            if Waypoint.Action == 
+                Enum.PathWaypointAction.Jump 
+            then 
+ 
+                local Humanoid = 
+                    Character: 
+                        FindFirstChildOfClass( 
+                            "Humanoid" 
+                        ) 
+ 
+                if Humanoid then 
+                    Humanoid.Jump = true 
+                end 
+            end 
+ 
+            local Success = 
+                DirectTween( 
+                    WaypointPosition, 
+                    SETTINGS.FAST_PATH_SPEED, 
+                    Target 
+                ) 
+ 
+            if not Success then 
+ 
+                if SafeMode then 
+                    NeedRepath = true 
+                    break 
+                end 
+ 
+                return false 
+            end 
+        end 
+ 
+        if not NeedRepath then 
+ 
+            if Target 
+                and Target.Parent 
+            then 
+                TargetPosition = 
+                    Target.Position 
+            end 
+ 
+            local FinalRoot, 
+                FinalCharacter = 
+                GetRootPart() 
+ 
+            if not FinalRoot then 
+                return false 
+            end 
+ 
+            if SafeMode then 
+ 
+                local FinalClear = 
+                    IsSegmentClear( 
+                        FinalRoot.Position, 
+                        TargetPosition, 
+                        FinalCharacter, 
+                        Target 
+                    ) 
+ 
+                if not FinalClear then 
+ 
+                    RepathCount += 1 
+ 
+                    if RepathCount > 
+                        MaxRepaths 
+                    then 
+                        return false 
+                    end 
+ 
+                    continue 
+                end 
+            end 
+ 
+            return DirectTween( 
+                TargetPosition, 
+                SETTINGS.FAST_PATH_SPEED, 
+                Target 
+            ) 
+        end 
+ 
+        RepathCount += 1 
+ 
+        if RepathCount > 
+            MaxRepaths 
+        then 
+            return false 
+        end 
+ 
+        task.wait(0.03) 
+    end 
+ 
+    return false 
+end 
+ 
+--================================================== 
+-- MOVEMENT DISPATCHER 
+--================================================== 
+ 
+local function MoveToTarget( 
+    TargetPosition, 
+    Target 
+) 
+ 
+    if not ScriptRunning then 
+        return false 
+    end 
+ 
+    if MovementMode == "Tween" then 
+ 
+        return DirectTween( 
+            TargetPosition, 
+            SETTINGS.FAST_PATH_SPEED, 
+            Target 
+        ) 
+    end 
+ 
+    if MovementMode == "Path Tween" then 
+ 
+        local Success = 
+            FollowPath( 
+                TargetPosition, 
+                Target, 
+                false 
+            ) 
+ 
+        if Success then 
+            return true 
+        end 
+ 
+        return false 
+    end 
+ 
+    if MovementMode == "Safe Tween" then 
+ 
+        local Success = 
+            FollowPath( 
+                TargetPosition, 
+                Target, 
+                true 
+            ) 
+ 
+        if Success then 
+            return true 
+        end 
+ 
+        local RootPart = 
+            GetRootPart() 
+ 
+        if not RootPart then 
+            return false 
+        end 
+ 
+        if Target 
+            and Target.Parent 
+        then 
+            TargetPosition = 
+                Target.Position 
+        end 
+ 
+        return FollowPath( 
+            TargetPosition, 
+            Target, 
+            true 
+        ) 
+    end 
+ 
+    return false 
+end 
+ 
+--================================================== 
+-- GEODE 
+--================================================== 
+ 
+local function GetGeode() 
+ 
+    return Workspace: 
+        FindFirstChild( 
+            "Geode" 
+        ) 
+end 
+ 
+local function IsGeodeTarget( 
+    Object, 
+    Character 
+) 
+ 
+    if not Object then 
+        return false 
+    end 
+ 
+    if not Object:IsA( 
+        "BasePart" 
+    ) then 
+        return false 
+    end 
+ 
+    if not Object.Parent then 
+        return false 
+    end 
+ 
+    if Character 
+        and Object:IsDescendantOf( 
+            Character 
+        ) 
+    then 
+        return false 
+    end 
+ 
+    if Object.Transparency >= 1 then 
+        return false 
+    end 
+ 
+    return true 
+end 
+ 
+--================================================== 
+-- GEODE TARGET SCANNER 
+--================================================== 
+ 
+local FailedGeodeTargets = {} 
+ 
+local function IsFailedGeodeTarget( 
+    Target 
+) 
+ 
+    if not Target then 
+        return false 
+    end 
+ 
+    local FailedUntil = 
+        FailedGeodeTargets[Target] 
+ 
+    if not FailedUntil then 
+        return false 
+    end 
+ 
+    if os.clock() >= FailedUntil then 
+        FailedGeodeTargets[Target] = nil 
+        return false 
+    end 
+ 
+    return true 
+end 
+ 
+local function MarkFailedGeodeTarget( 
+    Target 
+) 
+ 
+    if not Target then 
+        return 
+    end 
+ 
+    FailedGeodeTargets[Target] = 
+        os.clock() 
+        + math.max( 
+            SETTINGS.GEODE_FAILED_TARGET_COOLDOWN, 
+            0.25 
+        ) 
+end 
+ 
+local function GetGeodeTargets() 
+ 
+    local Geode = 
+        GetGeode() 
+ 
+    if not Geode then 
+        return {} 
+    end 
+ 
+    local Character = 
+        LocalPlayer.Character 
+ 
+    local Targets = {} 
+ 
+    for _, Object in ipairs( 
+        Geode:GetDescendants() 
+    ) do 
+ 
+        if IsGeodeTarget( 
+            Object, 
+            Character 
+        ) 
+            and not IsFailedGeodeTarget( 
+                Object 
+            ) 
+        then 
+ 
+            local LowerName = 
+                string.lower( 
+                    Object.Name 
+                ) 
+ 
+            if not LowerName:find( 
+                "status", 
+                1, 
+                true 
+            ) then 
+ 
+                table.insert( 
+                    Targets, 
+                    Object 
+                ) 
+            end 
+        end 
+    end 
+ 
+    return Targets 
+end 
+ 
+local function FindClosestGeodeTarget() 
+ 
+    local RootPart = 
+        GetRootPart() 
+ 
+    if not RootPart then 
+        return nil 
+    end 
+ 
+    local Targets = 
+        GetGeodeTargets() 
+ 
+    local Closest = nil 
+    local ClosestDistance = 
+        math.huge 
+ 
+    for _, Target in ipairs( 
+        Targets 
+    ) do 
+ 
+        if Target.Parent then 
+ 
+            local Distance = 
+                ( 
+                    RootPart.Position 
+                    - Target.Position 
+                ).Magnitude 
+ 
+            if Distance < 
+                ClosestDistance 
+            then 
+ 
+                ClosestDistance = 
+                    Distance 
+ 
+                Closest = 
+                    Target 
+            end 
+        end 
+    end 
+ 
+    return Closest 
+end 
+ 
+--================================================== 
+-- CANCEL GATHERING 
+--================================================== 
+ 
+local function CancelActiveGathering() 
+ 
+    AutoCollect = false 
+    AutoShake = false 
+    AutoFarm = false 
+ 
+    AutoCollectButton.Text = 
+        "Auto Collect: OFF" 
+ 
+    AutoCollectButton.BackgroundColor3 = 
+        Color3.fromRGB( 
+            35, 
+            35, 
+            40 
+        ) 
+ 
+    AutoShakeButton.Text = 
+        "Auto Shake: OFF" 
+ 
+    AutoShakeButton.BackgroundColor3 = 
+        Color3.fromRGB( 
+            35, 
+            35, 
+            40 
+        ) 
+ 
+    AutoFarmButton.Text = 
+        "Auto Farm: OFF" 
+ 
+    AutoFarmButton.BackgroundColor3 = 
+        Color3.fromRGB( 
+            35, 
+            35, 
+            40 
+        ) 
+end 
+ 
+--================================================== 
+-- FAST GEODE LOOP 
+--================================================== 
+ 
+local function StartFastPath() 
+ 
+    if FastPathThread then 
+        return 
+    end 
+ 
+    FastPathThread = 
+        task.spawn(function() 
+ 
+            while 
+                FastPathEnabled 
+                and ScriptRunning 
+            do 
+ 
+                local Geode = 
+                    GetGeode() 
+ 
+                if not Geode then 
+ 
+                    PathStatus.Text = 
+                        "Geode: ON | Workspace.Geode missing" 
+ 
+                    task.wait( 
+                        SETTINGS.FAST_PATH_RESCAN_DELAY 
+                    ) 
+ 
+                    continue 
+                end 
+ 
+                local Target = 
+                    FindClosestGeodeTarget() 
+ 
+                if not Target then 
+ 
+                    PathStatus.Text = 
+                        "Geode: ON | Scanning" 
+ 
+                    task.wait( 
+                        SETTINGS.FAST_PATH_RESCAN_DELAY 
+                    ) 
+ 
+                    continue 
+                end 
+ 
+                PathStatus.Text = 
+                    "Geode: ON | " 
+                    .. Target.Name 
+ 
+                local Success = 
+                    MoveToTarget( 
+                        Target.Position, 
+                        Target 
+                    ) 
+ 
+                if Success then 
+ 
+                    PathStatus.Text = 
+                        "Geode: ON | Re-scanning" 
+ 
+                else 
+ 
+                    MarkFailedGeodeTarget( 
+                        Target 
+                    ) 
+ 
+                    PathStatus.Text = 
+                        "Geode: ON | Re-routing" 
+ 
+                    task.wait(0.05) 
+                end 
+ 
+                task.wait( 
+                    SETTINGS.FAST_PATH_RESCAN_DELAY 
+                ) 
+            end 
+ 
+            FastPathThread = nil 
+ 
+            if not FastPathEnabled then 
+ 
+                PathStatus.Text = 
+                    "Geode: OFF" 
+            end 
+        end) 
+end 
+ 
+--================================================== 
+-- AUTO SELL 
+--================================================== 
+ 
+local function StartAutoSell() 
+ 
+    if AutoSellThread then 
+        return 
+    end 
+ 
+    AutoSellThread = 
+        task.spawn(function() 
+ 
+            while 
+                AutoSell 
+                and ScriptRunning 
+            do 
+ 
+                SellAll() 
+ 
+                task.wait( 
+                    SETTINGS.AUTO_SELL_DELAY 
+                ) 
+            end 
+ 
+            AutoSellThread = nil 
+        end) 
+end 
+ 
+--================================================== 
+-- AUTO COLLECT 
+--================================================== 
+ 
+local function StartAutoCollect() 
+ 
+    if AutoCollectThread then 
+        return 
+    end 
+ 
+    AutoCollectThread = 
+        task.spawn(function() 
+ 
+            while 
+                AutoCollect 
+                and ScriptRunning 
+            do 
+ 
+                Collect() 
+                UpdateSandDisplay() 
+ 
+                task.wait( 
+                    SETTINGS.AUTO_COLLECT_DELAY 
+                ) 
+            end 
+ 
+            AutoCollectThread = nil 
+        end) 
+end 
+ 
+--================================================== 
+-- AUTO SHAKE 
+--================================================== 
+ 
+local function StartAutoShake() 
+ 
+    if AutoShakeThread then 
+        return 
+    end 
+ 
+    AutoShakeThread = 
+        task.spawn(function() 
+ 
+            while 
+                AutoShake 
+                and ScriptRunning 
+            do 
+ 
+                local Character = 
+                    LocalPlayer.Character 
+ 
+                if not Character then 
+ 
+                    task.wait(0.25) 
+ 
+                    continue 
+                end 
+ 
+                if Character:GetAttribute( 
+                    "Panning" 
+                ) ~= true 
+                then 
+ 
+                    ScanForPan() 
+ 
+                    if not CurrentPan then 
+ 
+                        task.wait(0.5) 
+ 
+                        continue 
+                    end 
+ 
+                    local Started = 
+                        StartWaterPan() 
+ 
+                    if not Started then 
+ 
+                        task.wait(0.5) 
+ 
+                        continue 
+                    end 
+                end 
+ 
+                ShakeWhilePanning() 
+ 
+                task.wait(0.05) 
+            end 
+ 
+            AutoShakeThread = nil 
+        end) 
+end 
+ 
+--================================================== 
+-- BACKPACK / INVENTORY SPACE 
+--================================================== 
+ 
+local function GetBackpackCapacity() 
+ 
+    local PlayerGui = 
+        LocalPlayer:FindFirstChild("PlayerGui") 
+ 
+    if not PlayerGui then 
+        return 0, 0 
+    end 
+ 
+    local ToolUI = 
+        PlayerGui:FindFirstChild("ToolUI") 
+ 
+    if not ToolUI then 
+        return 0, 0 
+    end 
+ 
+    local FillingPan = 
+        ToolUI:FindFirstChild("FillingPan") 
+ 
+    if not FillingPan then 
+        return 0, 0 
+    end 
+ 
+    local InventorySpace = 
+        FillingPan:FindFirstChild("InventorySpace") 
+ 
+    if not InventorySpace then 
+        return 0, 0 
+    end 
+ 
+    local Text = InventorySpace.Text 
+ 
+    if typeof(Text) ~= "string" then 
+        return 0, 0 
+    end 
+ 
+    local Current, Capacity = 
+        Text:match("([%d%.]+)%s*/%s*([%d%.]+)") 
+ 
+    Current = tonumber(Current) 
+    Capacity = tonumber(Capacity) 
+ 
+    if not Current or not Capacity then 
+        return 0, 0 
+    end 
+ 
+    return Current, Capacity 
+end 
+ 
+--================================================== 
+-- NEAREST MERCHANT 
+--================================================== 
+ 
+local function GetNearestMerchant() 
+ 
+    local RootPart = 
+        GetRootPart() 
+ 
+    if not RootPart then 
+        return nil 
+    end 
+ 
+    local NPCs = 
+        Workspace:FindFirstChild("NPCs") 
+ 
+    if not NPCs then 
+        return nil 
+    end 
+ 
+    local NearestMerchant = nil 
+    local NearestDistance = math.huge 
+ 
+    for _, Object in ipairs(NPCs:GetDescendants()) do 
+ 
+        if Object:IsA("Model") then 
+ 
+            local LowerName = 
+                string.lower(Object.Name) 
+ 
+            if LowerName:find("merchant", 1, true) then 
+ 
+                local MerchantRoot = 
+                    Object:FindFirstChild( 
+                        "HumanoidRootPart", 
+                        true 
+                    ) 
+ 
+                if not MerchantRoot then 
+                    MerchantRoot = 
+                        Object:FindFirstChildWhichIsA( 
+                            "BasePart", 
+                            true 
+                        ) 
+                end 
+ 
+                if MerchantRoot then 
+ 
+                    local Distance = 
+                        ( 
+                            RootPart.Position 
+                            - MerchantRoot.Position 
+                        ).Magnitude 
+ 
+                    if Distance < NearestDistance then 
+ 
+                        NearestDistance = 
+                            Distance 
+ 
+                        NearestMerchant = 
+                            MerchantRoot 
+                    end 
+                end 
+            end 
+        end 
+    end 
+ 
+    return NearestMerchant 
+end 
+ 
+local function GoToNearestMerchant() 
+ 
+    local Merchant = 
+        GetNearestMerchant() 
+ 
+    if not Merchant then 
+ 
+        warn( 
+            "[Auto Farm] No merchant found." 
+        ) 
+ 
+        return false 
+    end 
+ 
+    print( 
+        "[Auto Farm] Going to:", 
+        Merchant:GetFullName() 
+    ) 
+ 
+    return MoveToTarget( 
+        Merchant.Position, 
+        Merchant 
+    ) 
+end 
+ 
+--================================================== 
+-- AUTO FARM 
+--================================================== 
+ 
+local function RunAutoFarm() 
+ 
+    if AutoFarmThread then 
+        return 
+    end 
+ 
+    AutoFarmThread = 
+        task.spawn(function() 
+ 
+            while 
+                AutoFarm 
+                and ScriptRunning 
+            do 
+ 
+                --========================================== 
+                -- SCAN PAN 
+                --========================================== 
+ 
+                ScanForPan() 
+                UpdateSandDisplay() 
+ 
+                if not CurrentPan then 
+ 
+                    task.wait(1) 
+ 
+                    continue 
+                end 
+ 
+                --========================================== 
+                -- SELECT LOCATION 
+                --========================================== 
+ 
+                local Location = 
+                    LOCATIONS[ 
+                        SelectedLocation 
+                    ] 
+ 
+                if not Location then 
+ 
+                    task.wait(1) 
+ 
+                    continue 
+                end 
+ 
+                --========================================== 
+                -- CHECK BACKPACK 
+                --========================================== 
+ 
+                local CurrentSpace, 
+                    MaxSpace = 
+                    GetBackpackCapacity() 
+ 
+                if MaxSpace <= 0 then 
+ 
+                    task.wait(0.5) 
+ 
+                    continue 
+                end 
+ 
+                --========================================== 
+                -- BACKPACK ALREADY FULL 
+                --========================================== 
+ 
+                if CurrentSpace >= MaxSpace then 
+ 
+                    if AutoSell then 
+ 
+                        local Sold = 
+                            GoToNearestMerchant() 
+ 
+                        if Sold then 
+ 
+                            task.wait(0.5) 
+ 
+                            SellAll() 
+ 
+                            task.wait( 
+                                SETTINGS.AUTO_SELL_DELAY 
+                            ) 
+ 
+                        else 
+ 
+                            task.wait(0.5) 
+ 
+                            continue 
+                        end 
+ 
+                    else 
+ 
+                        -- Auto Sell is OFF. 
+                        -- Do not travel to merchant. 
+                        -- Continue with the normal farm cycle. 
+ 
+                        task.wait(0.5) 
+                    end 
+ 
+                    if not AutoFarm 
+                        or not ScriptRunning 
+                    then 
+                        break 
+                    end 
+                end 
+ 
+                --========================================== 
+                -- GO TO SAND 
+                --========================================== 
+ 
+                if not MoveToTarget( 
+                    Location.Sand, 
+                    nil 
+                ) then 
+ 
+                    task.wait(0.5) 
+ 
+                    continue 
+                end 
+ 
+                if not AutoFarm 
+                    or not ScriptRunning 
+                then 
+                    break 
+                end 
+ 
+                --========================================== 
+                -- COLLECT UNTIL PAN CAPACITY IS FULL 
+                --========================================== 
+ 
+                while 
+                    AutoFarm 
+                    and ScriptRunning 
+                do 
+ 
+                    local Fill, 
+                        Capacity = 
+                        GetSand() 
+ 
+                    UpdateSandDisplay() 
+ 
+                    if Capacity <= 0 then 
+ 
+                        task.wait(0.5) 
+ 
+                        continue 
+                    end 
+ 
+                    if Fill >= Capacity then 
+                        break 
+                    end 
+ 
+                    Collect() 
+ 
+                    task.wait( 
+                        SETTINGS.AUTO_COLLECT_DELAY 
+                    ) 
+                end 
+ 
+                if not AutoFarm 
+                    or not ScriptRunning 
+                then 
+                    break 
+                end 
+ 
+                --========================================== 
+                -- BACKPACK FULL -> MERCHANT 
+                --========================================== 
+ 
+                local CurrentSpaceBeforeSell, 
+                    MaxSpaceBeforeSell = 
+                    GetBackpackCapacity() 
+ 
+                if MaxSpaceBeforeSell > 0 
+                    and CurrentSpaceBeforeSell >= 
+                        MaxSpaceBeforeSell 
+                then 
+ 
+                    if AutoSell then 
+ 
+                        local Sold = 
+                            GoToNearestMerchant() 
+ 
+                        if Sold then 
+ 
+                            task.wait(0.5) 
+ 
+                            SellAll() 
+ 
+                            task.wait( 
+                                SETTINGS.AUTO_SELL_DELAY 
+                            ) 
+ 
+                        else 
+ 
+                            -- Merchant could not be found. 
+                            task.wait(0.5) 
+                        end 
+                    end 
+                end 
+ 
+                if not AutoFarm 
+                    or not ScriptRunning 
+                then 
+                    break 
+                end 
+ 
+                --========================================== 
+                -- RETURN TO SAND AFTER SELL 
+                --========================================== 
+ 
+                if AutoSell 
+                    and MaxSpaceBeforeSell > 0 
+                    and CurrentSpaceBeforeSell >= 
+                        MaxSpaceBeforeSell 
+                then 
+ 
+                    if not MoveToTarget( 
+                        Location.Sand, 
+                        nil 
+                    ) then 
+ 
+                        task.wait(0.5) 
+ 
+                        continue 
+                    end 
+                end 
+ 
+                if not AutoFarm 
+                    or not ScriptRunning 
+                then 
+                    break 
+                end 
+ 
+                --========================================== 
+                -- GO TO WATER 
+                -- ORIGINAL WATER TWEEN 
+                --========================================== 
+ 
+                if not MoveToTarget( 
+                    Location.Water, 
+                    nil 
+                ) then 
+ 
+                    task.wait(0.5) 
+ 
+                    continue 
+                end 
+ 
+                if not AutoFarm 
+                    or not ScriptRunning 
+                then 
+                    break 
+                end 
+ 
+                --========================================== 
+                -- START WATER PAN 
+                --========================================== 
+ 
+                task.wait(0.75) 
+ 
+                local Started = 
+                    StartWaterPan() 
+ 
+                if not Started then 
+ 
+                    task.wait(0.5) 
+ 
+                    continue 
+                end 
+ 
+                --========================================== 
+                -- SHAKE WHILE PANNING 
+                --========================================== 
+ 
+                ShakeWhilePanning() 
+ 
+                if not AutoFarm 
+                    or not ScriptRunning 
+                then 
+                    break 
+                end 
+ 
+                --========================================== 
+                -- BACKPACK FULL AFTER PANNING -> MERCHANT 
+                --========================================== 
+ 
+                local CurrentSpaceAfterPan, 
+                    MaxSpaceAfterPan = 
+                    GetBackpackCapacity() 
+ 
+                if AutoSell 
+                    and MaxSpaceAfterPan > 0 
+                    and CurrentSpaceAfterPan >= 
+                        MaxSpaceAfterPan 
+                then 
+ 
+                    local Sold = 
+                        GoToNearestMerchant() 
+ 
+                    if Sold then 
+ 
+                        task.wait(0.5) 
+ 
+                        SellAll() 
+ 
+                        task.wait( 
+                            SETTINGS.AUTO_SELL_DELAY 
+                        ) 
+ 
+                        if not AutoFarm 
+                            or not ScriptRunning 
+                        then 
+                            break 
+                        end 
+ 
+                        --========================================== 
+                        -- RETURN TO SAND AFTER POST-WATER SELL 
+                        --========================================== 
+ 
+                        if not MoveToTarget( 
+                            Location.Sand, 
+                            nil 
+                        ) then 
+ 
+                            task.wait(0.5) 
+ 
+                            continue 
+                        end 
+ 
+                    else 
+ 
+                        task.wait(0.5) 
+                    end 
+                end 
+ 
+                if not AutoFarm 
+                    or not ScriptRunning 
+                then 
+                    break 
+                end 
+ 
+                --========================================== 
+                -- NEXT CYCLE 
+                --========================================== 
+ 
+                task.wait(0.25) 
+            end 
+ 
+            AutoFarmThread = nil 
+        end) 
+end 
+ 
+--================================================== 
+-- BUTTON EVENTS 
+--================================================== 
+ 
+CollectButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        Collect() 
+        UpdateSandDisplay() 
+    end 
+) 
+ 
+AutoCollectButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        AutoCollect = 
+            not AutoCollect 
+ 
+        if AutoCollect then 
+ 
+            AutoCollectButton.Text = 
+                "Auto Collect: ON" 
+ 
+            AutoCollectButton.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    70, 
+                    130, 
+                    80 
+                ) 
+ 
+            StartAutoCollect() 
+ 
+        else 
+ 
+            AutoCollectButton.Text = 
+                "Auto Collect: OFF" 
+ 
+            AutoCollectButton.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    35, 
+                    35, 
+                    40 
+                ) 
+        end 
+    end 
+) 
+ 
+AutoShakeButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        AutoShake = 
+            not AutoShake 
+ 
+        if AutoShake then 
+ 
+            AutoShakeButton.Text = 
+                "Auto Shake: ON" 
+ 
+            AutoShakeButton.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    70, 
+                    130, 
+                    80 
+                ) 
+ 
+            StartAutoShake() 
+ 
+        else 
+ 
+            AutoShakeButton.Text = 
+                "Auto Shake: OFF" 
+ 
+            AutoShakeButton.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    35, 
+                    35, 
+                    40 
+                ) 
+        end 
+    end 
+) 
+ 
+AutoSellButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        AutoSell = 
+            not AutoSell 
+ 
+        if AutoSell then 
+ 
+            AutoSellButton.Text = 
+                "Auto Sell: ON" 
+ 
+            AutoSellButton.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    70, 
+                    130, 
+                    80 
+                ) 
+ 
+            StartAutoSell() 
+ 
+        else 
+ 
+            AutoSellButton.Text = 
+                "Auto Sell: OFF" 
+ 
+            AutoSellButton.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    35, 
+                    35, 
+                    40 
+                ) 
+        end 
+    end 
+) 
+ 
+AutoFarmButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        AutoFarm = 
+            not AutoFarm 
+ 
+        if AutoFarm then 
+ 
+            AutoFarmButton.Text = 
+                "Auto Farm: ON" 
+ 
+            AutoFarmButton.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    70, 
+                    130, 
+                    80 
+                ) 
+ 
+            RunAutoFarm() 
+ 
+        else 
+ 
+            AutoFarmButton.Text = 
+                "Auto Farm: OFF" 
+ 
+            AutoFarmButton.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    35, 
+                    35, 
+                    40 
+                ) 
+        end 
+    end 
+) 
+ 
+--================================================== 
+-- GEODE BUTTON 
+--================================================== 
+ 
+FastPathButton.MouseButton1Click:Connect( 
+    function() 
+ 
+        FastPathEnabled = 
+            not FastPathEnabled 
+ 
+        if FastPathEnabled then 
+ 
+            CancelActiveGathering() 
+ 
+            FastPathButton.Text = 
+                "Geode Path: ON" 
+ 
+            FastPathButton.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    70, 
+                    130, 
+                    80 
+                ) 
+ 
+            PathStatus.Text = 
+                "Geode: ON | Scanning" 
+ 
+            StartFastPath() 
+ 
+        else 
+ 
+            FastPathButton.Text = 
+                "Geode Path: OFF" 
+ 
+            FastPathButton.BackgroundColor3 = 
+                Color3.fromRGB( 
+                    35, 
+                    35, 
+                    40 
+                ) 
+ 
+            PathStatus.Text = 
+                "Geode: OFF" 
+        end 
+    end 
+) 
+ 
+--================================================== 
+-- CHARACTER RESPAWN 
+--================================================== 
+ 
+Connections.CharacterAdded = 
+    LocalPlayer.CharacterAdded:Connect( 
+        function() 
+ 
+            task.wait(1) 
+ 
+            if not ScriptRunning then 
+                return 
+            end 
+ 
+            ScanForPan() 
+            UpdateSandDisplay() 
+ 
+            if FastPathEnabled 
+                and not FastPathThread 
+            then 
+                StartFastPath() 
+            end 
+        end 
+    ) 
+ 
+--================================================== 
+-- PAN SCANNER LOOP 
+--================================================== 
+ 
+task.spawn(function() 
+ 
+    while ScriptRunning do 
+ 
+        for i = 
+            SETTINGS.PAN_SCAN_INTERVAL, 
+            1, 
+            -1 
+        do 
+ 
+            if not ScriptRunning then 
+                return 
+            end 
+ 
+            UpdateSandDisplay() 
+ 
+            task.wait(1) 
+        end 
+ 
+        ScanForPan() 
+    end 
+end) 
+ 
+--================================================== 
+-- GEODE STATUS LOOP 
+--================================================== 
+ 
+task.spawn(function() 
+ 
+    while ScriptRunning do 
+ 
+        if FastPathEnabled then 
+ 
+            local Geode = 
+                GetGeode() 
+ 
+            if not Geode then 
+ 
+                PathStatus.Text = 
+                    "Geode: ON | Geode missing" 
+ 
+            else 
+ 
+                local Target = 
+                    FindClosestGeodeTarget() 
+ 
+                if Target then 
+ 
+                    PathStatus.Text = 
+                        "Geode: ON | " 
+                        .. Target.Name 
+ 
+                else 
+ 
+                    PathStatus.Text = 
+                        "Geode: ON | Scanning" 
+                end 
+            end 
+        end 
+ 
+        task.wait( 
+            SETTINGS.FAST_PATH_RESCAN_DELAY 
+        ) 
+    end 
+end) 
+ 
+--================================================== 
+-- DRAGGING 
+--================================================== 
+ 
+local Dragging = false 
+local DragStart = nil 
+local StartPosition = nil 
+ 
+TitleBar.InputBegan:Connect( 
+    function(Input) 
+ 
+        if Input.UserInputType == 
+            Enum.UserInputType.MouseButton1 
+        then 
+ 
+            Dragging = true 
+            DragStart = Input.Position 
+            StartPosition = Main.Position 
+        end 
+    end 
+) 
+ 
+TitleBar.InputEnded:Connect( 
+    function(Input) 
+ 
+        if Input.UserInputType == 
+            Enum.UserInputType.MouseButton1 
+        then 
+ 
+            Dragging = false 
+        end 
+    end 
+) 
+ 
+Connections.InputChanged = 
+    UserInputService.InputChanged:Connect( 
+        function(Input) 
+ 
+            if not Dragging then 
+                return 
+            end 
+ 
+            if Input.UserInputType == 
+                Enum.UserInputType.MouseMovement 
+            then 
+ 
+                local Delta = 
+                    Input.Position 
+                    - DragStart 
+ 
+                Main.Position = 
+                    UDim2.new( 
+ 
+                        StartPosition.X.Scale, 
+                        StartPosition.X.Offset 
+                            + Delta.X, 
+ 
+                        StartPosition.Y.Scale, 
+                        StartPosition.Y.Offset 
+                            + Delta.Y 
+                    ) 
+            end 
+        end 
+    ) 
+ 
+--================================================== 
+-- INSERT / RIGHT CONTROL 
+--================================================== 
+ 
+Connections.InputBegan = 
+    UserInputService.InputBegan:Connect( 
+        function( 
+            Input, 
+            GameProcessed 
+        ) 
+ 
+            if GameProcessed then 
+                return 
+            end 
+ 
+            if Input.KeyCode == 
+                Enum.KeyCode.Insert 
+                or Input.KeyCode == 
+                Enum.KeyCode.RightControl 
+            then 
+ 
+                Main.Visible = 
+                    not Main.Visible 
+            end 
+        end 
+    ) 
+ 
+--================================================== 
+-- SHUTDOWN 
+--================================================== 
+ 
+local function Shutdown() 
+ 
+    if not ScriptRunning then 
+        return 
+    end 
+ 
+    ScriptRunning = false 
+ 
+    AutoCollect = false 
+    AutoShake = false 
+    AutoSell = false 
+    AutoFarm = false 
+    FastPathEnabled = false 
+ 
+    for _, Connection in pairs( 
+        Connections 
+    ) do 
+ 
+        pcall(function() 
+ 
+            if Connection then 
+                Connection:Disconnect() 
+            end 
+        end) 
+    end 
+ 
+    Connections = {} 
+ 
+    if ScreenGui then 
+        ScreenGui:Destroy() 
+    end 
+end 
+ 
+CloseButton.MouseButton1Click:Connect( 
+    Shutdown 
+) 
+ 
+--================================================== 
+-- INITIALIZE 
+--================================================== 
+ 
+task.spawn(function() 
+ 
+    task.wait(0.5) 
+ 
+    if ScriptRunning then 
+ 
+        ScanForPan() 
+        UpdateSandDisplay() 
+ 
+        PathStatus.Text = 
+            "Geode: OFF" 
+ 
+        MovementStatus.Text = 
+            "Movement: " 
+            .. MovementMode 
+    end 
+end)
