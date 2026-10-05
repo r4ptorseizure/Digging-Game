@@ -1,0 +1,3794 @@
+--//========================================================
+--// CHARLES'S ROCKET RUSH TOOL
+--// Rocket Rush - Full GUI + Full-Map Vehicle Farm + Automatic World 1 Completion
+--// Wave / Luau - GUI startup fix
+--//
+--// GUI Toggle: INSERT or RIGHT CTRL
+--// Auto Farm priority is read from Config.TargetTypes[*].Points
+--// Current game values:
+--//   Helicopter = 40
+--//   AntiAir    = 35
+--//   Tank       = 25
+--//========================================================
+
+if getgenv().CharlesRocketRush then
+    if getgenv().CharlesRocketRush.Unload then
+        pcall(getgenv().CharlesRocketRush.Unload)
+    end
+end
+
+--==========================================================
+-- SERVICES
+--==========================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local LocalPlayer = Players.LocalPlayer
+
+print("[Charles's Rocket Rush Tool] Starting GUI-safe build...")
+
+--==========================================================
+-- GAME REFERENCES
+--==========================================================
+
+local MissileGame = ReplicatedStorage:WaitForChild("MissileGame", 15)
+
+if not MissileGame then
+    warn("[Charles's Rocket Rush Tool] ReplicatedStorage.MissileGame was not found after 15 seconds.")
+    return
+end
+
+local Remotes = MissileGame:WaitForChild("Remotes", 15)
+
+if not Remotes then
+    warn("[Charles's Rocket Rush Tool] MissileGame.Remotes was not found after 15 seconds.")
+    return
+end
+
+local function GetRemote(name)
+    return Remotes:FindFirstChild(name)
+end
+
+local MissileEvent = GetRemote("MissileEvent")
+local TargetHit = GetRemote("TargetHit")
+local BuyUpgrade = GetRemote("BuyUpgrade")
+local Evolve = GetRemote("Evolve")
+local EquipRocket = GetRemote("EquipRocket")
+local EquipLauncher = GetRemote("EquipLauncher")
+local ClaimQuest = GetRemote("ClaimQuest")
+local PlaytimeClaim = GetRemote("PlaytimeClaim")
+local AchievementClaim = GetRemote("AchievementClaim")
+
+--==========================================================
+-- MODULES
+--==========================================================
+
+local Config
+local RocketStats
+local MissileRig
+local Landing
+local WorldConfig
+local QuestData
+local AchievementConfig
+
+local function TryRequire(parent, name)
+    local module = parent and parent:FindFirstChild(name)
+
+    if not module or not module:IsA("ModuleScript") then
+        warn("[Charles's Rocket Rush Tool] Optional module missing: " .. tostring(name))
+        return nil
+    end
+
+    local ok, result = pcall(require, module)
+
+    if not ok then
+        warn(
+            "[Charles's Rocket Rush Tool] Could not require "
+            .. tostring(name)
+            .. ": "
+            .. tostring(result)
+        )
+        return nil
+    end
+
+    return result
+end
+
+Config = TryRequire(MissileGame, "Config")
+RocketStats = TryRequire(MissileGame, "RocketStats")
+MissileRig = TryRequire(MissileGame, "MissileRig")
+Landing = TryRequire(MissileGame, "Landing")
+WorldConfig = TryRequire(MissileGame, "WorldConfig")
+
+pcall(function()
+    local module = ReplicatedStorage:FindFirstChild("QuestData")
+    if module then
+        QuestData = require(module)
+    end
+end)
+
+pcall(function()
+    local module = MissileGame:FindFirstChild("AchievementConfig")
+    if module then
+        AchievementConfig = require(module)
+    end
+end)
+
+--==========================================================
+-- STATE
+--==========================================================
+
+local State = {
+    Running = true,
+
+    AutoTargetFarm = false,
+    AutoCompleteWorld1 = false,
+    StudFarm = false,
+    MoveFarm = false,
+    AutoLaunch = false,
+    AutoBoost = false,
+    AutoPilot = false,
+    AutoMiniRockets = false,
+
+    AutoCoreUpgrades = false,
+    AutoAbilities = false,
+    AutoEvolve = false,
+    AutoQuests = false,
+    AutoAchievements = false,
+    AutoPlaytime = false,
+    AutoEquipBest = false,
+
+    InfiniteFuel = false,
+    TargetESP = false,
+
+    Tank = true,
+    Helicopter = true,
+    AntiAir = true,
+
+    FarmDelay = 0.12,
+    -- Extra clearance beyond the vehicle AND the missile's own bounds.
+    FarmTeleportOffset = 4,
+    FarmKillTimeout = 1.25,
+    FarmRepeatHits = 2,
+
+    -- World 1 completion uses two heights:
+    -- 1) SafeHeight: visibly above the landing pad, nose pointed at the sky.
+    -- 2) CaptureHeight: tail remains ABOVE the pad while still entering the
+    --    game's normal landing capture zone (default CaptureHeight = 3).
+    World1SafeHeight = 10,
+    World1CaptureHeight = 1.35,
+    World1EndHeightOffset = 1.35,
+
+    -- Million Stud Farm: the game calls its distance unit STUDS.  This
+    -- teleports the missile almost one million horizontal studs from launch,
+    -- then lets MissileClient hit a LOCAL wall so the normal Explode path runs.
+    StudFarmDistance = 1000000,
+    StudFarmWallGap = 55,
+    StudFarmCrashSpeed = 4200,
+    StudFarmSafeAltitude = 350,
+    StudFarmRelaunchDelay = 2.8,
+    StudFarmCreditTimeout = 8,
+
+    -- Move leaderboard = TotalMoves.  MissileClient recognizes four tricks:
+    -- Backflip, Frontflip, Roll (BARREL ROLL), Spin (FLAT SPIN).
+    MoveFarmType = "Cycle",
+    MoveFarmDegreesPerSecond = 720,
+    MoveFarmSafeAltitude = 650,
+
+    FlightSpeed = 450,
+    SpeedMultiplier = 1,
+    HandlingMultiplier = 1,
+    LaunchMultiplier = 1,
+}
+
+local Connections = {}
+local TargetCache = {}
+local ESPObjects = {}
+local BoostHeld = false
+local CurrentFarmTarget = nil
+local CurrentFarmTargetSince = 0
+local LastFarmTeleport = 0
+local LastFarmHit = 0
+
+local World1AutoPhase = "idle"
+local World1AutoPhaseSince = 0
+local World1LastLaunchAttempt = 0
+local World1AutoToggleControl = nil
+
+local StudFarmPhase = "idle"
+local StudFarmPhaseSince = 0
+local StudFarmLastLaunchAttempt = 0
+local StudFarmLastRelaunchAttempt = 0
+local StudFarmRunStartTotal = 0
+local StudFarmSessionStartTotal = 0
+local StudFarmRuns = 0
+local StudFarmLastGain = 0
+local StudFarmToggleControl = nil
+local StudFarmStatusValue = nil
+local StudFarmRunsValue = nil
+local StudFarmSessionValue = nil
+local StudFarmWall = nil
+local StudFarmLaunchPosition = nil
+local StudFarmCrashAttempts = 0
+
+local MoveFarmToggleControl = nil
+local MoveFarmStatusValue = nil
+local MoveFarmTotalValue = nil
+local MoveFarmSessionValue = nil
+local MoveFarmLastLaunchAttempt = 0
+local MoveFarmSafePosition = nil
+local MoveFarmAccumulated = 0
+local MoveFarmCycleIndex = 1
+local MoveFarmSessionStart = 0
+local MoveFarmLastTotal = 0
+local MoveFarmRecognized = 0
+local MoveFarmTypes = {"Backflip", "Frontflip", "Barrel Roll", "Flat Spin"}
+
+local Environment = {}
+getgenv().CharlesRocketRush = Environment
+
+--==========================================================
+-- CONNECTION MANAGER
+--==========================================================
+
+local function Connect(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(Connections, connection)
+    return connection
+end
+
+--==========================================================
+-- INPUT HELPERS
+--==========================================================
+
+local function TapKey(key)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, key, false, game)
+        task.wait(0.04)
+        VirtualInputManager:SendKeyEvent(false, key, false, game)
+    end)
+end
+
+local function HoldKey(key, holding)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(holding, key, false, game)
+    end)
+end
+
+--==========================================================
+-- LOCAL MISSILE
+--==========================================================
+
+local function GetLocalMissile()
+    return Workspace:FindFirstChild("LocalMissile")
+end
+
+local function GetMissileRoot()
+    local missile = GetLocalMissile()
+    if not missile then
+        return nil
+    end
+
+    if missile:IsA("BasePart") then
+        return missile
+    end
+
+    if missile:IsA("Model") then
+        return missile.PrimaryPart or missile:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    return nil
+end
+
+local function GetCharacterRoot()
+    local character = LocalPlayer.Character
+    return character and character:FindFirstChild("HumanoidRootPart")
+end
+
+-- The game's MissileClient does not drive the rocket by physics alone.
+-- It stores the REAL flight position/rotation in local state and then calls
+-- MissileRig.place(LocalMissile, flightCFrame) every frame. Moving only the
+-- PrimaryPart makes one rocket piece jump while MissileClient keeps drawing
+-- the rest of the rig at the old flight position.
+--
+-- Wave exposes getgc(), so we locate MissileClient's small internal API table:
+--   api.get() -> mode, missile, position, velocity, rotation, ...
+--   api.set() -> position, velocity, rotation, ...
+-- Updating that state is what makes the WHOLE rocket teleport and stay there.
+
+local CachedMissileAPI = nil
+
+local function ValidateMissileAPI(api)
+    if type(api) ~= "table" then
+        return false
+    end
+
+    local getState = rawget(api, "get")
+    local setState = rawget(api, "set")
+    local hitTarget = rawget(api, "hitTarget")
+
+    if type(getState) ~= "function"
+        or type(setState) ~= "function"
+        or type(hitTarget) ~= "function" then
+        return false
+    end
+
+    local ok, mode, missile, position = pcall(getState)
+    if not ok or type(mode) ~= "string" or typeof(position) ~= "Vector3" then
+        return false
+    end
+
+    if missile ~= nil and typeof(missile) ~= "Instance" then
+        return false
+    end
+
+    return true
+end
+
+local function FindMissileAPI()
+    if ValidateMissileAPI(CachedMissileAPI) then
+        return CachedMissileAPI
+    end
+
+    CachedMissileAPI = nil
+
+    if type(getgc) ~= "function" then
+        return nil
+    end
+
+    local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then
+        ok, objects = pcall(getgc)
+    end
+
+    if not ok or type(objects) ~= "table" then
+        return nil
+    end
+
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local success, valid = pcall(ValidateMissileAPI, object)
+            if success and valid then
+                CachedMissileAPI = object
+                return object
+            end
+        end
+    end
+
+    return nil
+end
+
+local function GetMissileClientState()
+    local api = FindMissileAPI()
+    if not api then
+        return nil
+    end
+
+    local results = table.pack(pcall(api.get))
+    if not results[1] then
+        CachedMissileAPI = nil
+        return nil
+    end
+
+    return {
+        API = api,
+        Mode = results[2],
+        Missile = results[3],
+        Position = results[4],
+        Velocity = results[5],
+        Rotation = results[6],
+        Rotation2 = results[7],
+        Rotation3 = results[8],
+        Fuel = results[9],
+        Stats = results[10],
+        Yaw = results[11],
+        Pitch = results[12],
+    }
+end
+
+local function IsMissileFlying()
+    local state = GetMissileClientState()
+    if state then
+        return state.Mode == "flight", state
+    end
+
+    return LocalPlayer:GetAttribute("InRun") == true, nil
+end
+
+--==========================================================
+-- ROCKET STAT MODIFIERS
+--==========================================================
+
+local OriginalUnlimitedFuel = Config and Config.UnlimitedFuel
+local OriginalApplyUpgrades
+local OriginalApplyLaunchUpgrade
+
+if RocketStats then
+    OriginalApplyUpgrades = RocketStats.applyUpgrades
+    OriginalApplyLaunchUpgrade = RocketStats.applyLaunchUpgrade
+
+    if OriginalApplyUpgrades then
+        pcall(function()
+            RocketStats.applyUpgrades = function(stats, player)
+            local newStats = OriginalApplyUpgrades(stats, player)
+            if type(newStats) ~= "table" then
+                return newStats
+            end
+
+            if type(newStats.Thrust) == "number" then
+                newStats.Thrust *= State.SpeedMultiplier
+            end
+
+            if type(newStats.MaxSpeed) == "number" then
+                newStats.MaxSpeed *= State.SpeedMultiplier
+            end
+
+            for _, field in ipairs({
+                "TurnRate",
+                "RollRate",
+                "TurnAccel",
+                "MouseAimMaxRate",
+                "MouseAimResponse",
+            }) do
+                if type(newStats[field]) == "number" then
+                    newStats[field] *= State.HandlingMultiplier
+                end
+            end
+
+            if State.InfiniteFuel then
+                newStats.FuelMax = 1000000000
+                newStats.FuelBurnPerSec = 0
+                newStats.FuelRegenPerSec = 1000000
+            end
+
+            return newStats
+            end
+        end)
+    end
+
+    if OriginalApplyLaunchUpgrade then
+        pcall(function()
+            RocketStats.applyLaunchUpgrade = function(stats, player)
+            local newStats = OriginalApplyLaunchUpgrade(stats, player)
+            if type(newStats) ~= "table" then
+                return newStats
+            end
+
+            if type(newStats.LaunchSpeed) == "number" then
+                newStats.LaunchSpeed *= State.LaunchMultiplier
+            end
+
+            if type(newStats.LaunchAssistAccel) == "number" then
+                newStats.LaunchAssistAccel *= State.LaunchMultiplier
+            end
+
+            if type(newStats.LaunchAssistTime) == "number" then
+                newStats.LaunchAssistTime *= math.max(State.LaunchMultiplier, 1)
+            end
+
+            return newStats
+            end
+        end)
+    end
+end
+
+local function UpdateInfiniteFuel()
+    if Config then
+        Config.UnlimitedFuel = State.InfiniteFuel and true or OriginalUnlimitedFuel
+    end
+end
+
+--==========================================================
+-- TARGET DISCOVERY
+--==========================================================
+
+local function IsTargetAlive(target)
+    return target
+        and target.Parent
+        and target:IsA("Model")
+        and target:GetAttribute("TargetType") ~= nil
+        and target:GetAttribute("Destroyed") ~= true
+end
+
+local function IsTargetAllowed(target)
+    if not IsTargetAlive(target) then
+        return false
+    end
+
+    local kind = tostring(target:GetAttribute("TargetType") or "")
+    local lower = string.lower(kind)
+
+    if lower == "tank" or string.find(lower, "tank", 1, true) then
+        return State.Tank
+    end
+
+    if lower == "helicopter" or string.find(lower, "heli", 1, true) then
+        return State.Helicopter
+    end
+
+    if lower == "antiair" or string.find(lower, "anti", 1, true) or string.find(lower, "air", 1, true) then
+        return State.AntiAir
+    end
+
+    return true
+end
+
+local function GetTargetPosition(target)
+    if not target then
+        return nil
+    end
+
+    if target:IsA("Model") then
+        local ok, pivot = pcall(target.GetPivot, target)
+        if ok and pivot then
+            return pivot.Position
+        end
+    end
+
+    local part = target:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.Position or nil
+end
+
+local function GetTargetPoints(target)
+    if not target then
+        return 0
+    end
+
+    local targetType = target:GetAttribute("TargetType")
+
+    if Config and type(Config.TargetTypes) == "table" then
+        local info = Config.TargetTypes[targetType]
+        if type(info) == "table" then
+            return tonumber(info.Points) or 0
+        end
+    end
+
+    -- Current Rocket Rush defaults, used only if the module cannot be read.
+    if targetType == "Helicopter" then
+        return 40
+    elseif targetType == "AntiAir" then
+        return 35
+    elseif targetType == "Tank" then
+        return 25
+    end
+
+    return 0
+end
+
+local function AddTargetCandidate(object, results, seen)
+    if not object
+        or not object:IsA("Model")
+        or object:GetAttribute("TargetType") == nil
+        or seen[object] then
+
+        return
+    end
+
+    seen[object] = true
+    table.insert(results, object)
+end
+
+local function AddTargetsFrom(root, results, seen)
+    if not root then
+        return
+    end
+
+    AddTargetCandidate(root, results, seen)
+
+    -- Use descendants rather than only direct children. Some vehicle groups in
+    -- Rocket Rush are nested beneath map/course containers.
+    for _, object in ipairs(root:GetDescendants()) do
+        AddTargetCandidate(object, results, seen)
+    end
+end
+
+local function RebuildTargetCache()
+    local results = {}
+    local seen = {}
+
+    -- Fast-path the folders used by TargetClient.
+    local worldGame = Workspace:FindFirstChild("MissileGame")
+    if worldGame then
+        AddTargetsFrom(worldGame:FindFirstChild("Targets"), results, seen)
+
+        if Config and type(Config.ExtraTargetFolders) == "table" then
+            for _, folderName in ipairs(Config.ExtraTargetFolders) do
+                AddTargetsFrom(worldGame:FindFirstChild(folderName), results, seen)
+            end
+        else
+            AddTargetsFrom(worldGame:FindFirstChild("Anti_Aircraft"), results, seen)
+        end
+    end
+
+    -- Some builds/maps also keep target groups outside workspace.MissileGame.
+    local freeRoam = Workspace:FindFirstChild("FreeRoam")
+    if freeRoam then
+        AddTargetsFrom(freeRoam:FindFirstChild("FreeroamTARGETS"), results, seen)
+        AddTargetsFrom(freeRoam:FindFirstChild("Targets"), results, seen)
+    end
+
+    -- IMPORTANT:
+    -- Do this EVERY refresh, not only when the normal folders are empty.
+    -- The old fallback behavior was why Auto Farm could appear to see only
+    -- the vehicles around the current area.
+    for _, object in ipairs(Workspace:GetDescendants()) do
+        AddTargetCandidate(object, results, seen)
+    end
+
+    TargetCache = results
+    return results
+end
+
+local function GetDistanceReferencePosition()
+    local missileRoot = GetMissileRoot()
+    if missileRoot then
+        return missileRoot.Position
+    end
+
+    local characterRoot = GetCharacterRoot()
+    if characterRoot then
+        return characterRoot.Position
+    end
+
+    return Vector3.zero
+end
+
+-- Highest points first. Distance only breaks ties.
+local function GetBestTarget()
+    local reference = GetDistanceReferencePosition()
+    local bestTarget = nil
+    local bestPoints = -math.huge
+    local bestDistance = math.huge
+
+    for _, target in ipairs(TargetCache) do
+        if IsTargetAllowed(target) then
+            local position = GetTargetPosition(target)
+            if position then
+                local points = GetTargetPoints(target)
+                local distance = (position - reference).Magnitude
+
+                if points > bestPoints or (points == bestPoints and distance < bestDistance) then
+                    bestTarget = target
+                    bestPoints = points
+                    bestDistance = distance
+                end
+            end
+        end
+    end
+
+    return bestTarget, bestPoints, bestDistance
+end
+
+local function GetNearestTarget(position)
+    local bestTarget
+    local bestDistance = math.huge
+
+    for _, target in ipairs(TargetCache) do
+        if IsTargetAllowed(target) then
+            local targetPosition = GetTargetPosition(target)
+            if targetPosition then
+                local distance = (targetPosition - position).Magnitude
+                if distance < bestDistance then
+                    bestDistance = distance
+                    bestTarget = target
+                end
+            end
+        end
+    end
+
+    return bestTarget, bestDistance
+end
+
+--==========================================================
+-- TARGET BOUNDS / SAFE EXTERIOR PLACEMENT
+--==========================================================
+
+local function GetModelBounds(model)
+    if not model or not model:IsA("Model") then
+        return nil
+    end
+
+    local ok, boxCFrame, boxSize = pcall(model.GetBoundingBox, model)
+    if ok and typeof(boxCFrame) == "CFrame" and typeof(boxSize) == "Vector3" then
+        return boxCFrame, boxSize
+    end
+
+    local position = GetTargetPosition(model)
+    if position then
+        return CFrame.new(position), Vector3.new(6, 6, 6)
+    end
+
+    return nil, nil
+end
+
+local function GetMissileExtent(missile)
+    if not missile then
+        return 4
+    end
+
+    if missile:IsA("Model") then
+        local ok, size = pcall(missile.GetExtentsSize, missile)
+        if ok and typeof(size) == "Vector3" then
+            -- We point the missile toward the target. Using half of its largest
+            -- dimension guarantees the model's center is not placed inside a
+            -- vehicle even if the rocket is unusually long.
+            return math.max(size.X, size.Y, size.Z) * 0.5
+        end
+    elseif missile:IsA("BasePart") then
+        return math.max(missile.Size.X, missile.Size.Y, missile.Size.Z) * 0.5
+    end
+
+    return 4
+end
+
+local function GetClosestPointOnTargetBounds(target, worldPosition)
+    local boxCFrame, boxSize = GetModelBounds(target)
+    if not boxCFrame then
+        return GetTargetPosition(target)
+    end
+
+    local half = boxSize * 0.5
+    local localPoint = boxCFrame:PointToObjectSpace(worldPosition)
+
+    local clamped = Vector3.new(
+        math.clamp(localPoint.X, -half.X, half.X),
+        math.clamp(localPoint.Y, -half.Y, half.Y),
+        math.clamp(localPoint.Z, -half.Z, half.Z)
+    )
+
+    return boxCFrame:PointToWorldSpace(clamped)
+end
+
+local function GetOutsideTargetPlacement(target, missile)
+    local boxCFrame, boxSize = GetModelBounds(target)
+    if not boxCFrame then
+        return nil
+    end
+
+    local halfX = boxSize.X * 0.5
+    local halfZ = boxSize.Z * 0.5
+
+    -- Exit through the vehicle's narrowest horizontal side. That gives the
+    -- most room to keep the whole rocket outside while remaining within the
+    -- server's target-hit distance.
+    local direction
+    local targetHalfExtent
+
+    if halfX <= halfZ then
+        direction = boxCFrame.RightVector
+        targetHalfExtent = halfX
+    else
+        direction = boxCFrame.LookVector
+        targetHalfExtent = halfZ
+    end
+
+    -- Use whichever side is closest to the rocket's current location. This
+    -- prevents unnecessary flips through the vehicle when moving target-to-target.
+    local missileRoot = GetMissileRoot()
+    if missileRoot then
+        local relative = missileRoot.Position - boxCFrame.Position
+        if relative:Dot(direction) < 0 then
+            direction = -direction
+        end
+    end
+
+    local missileHalfExtent = GetMissileExtent(missile)
+    local extraClearance = math.max(1, State.FarmTeleportOffset)
+
+    local requiredDistance =
+        targetHalfExtent
+        + missileHalfExtent
+        + extraClearance
+
+    -- TargetHitRange is 30 in this place. Keep a small validation margin.
+    local hitRange = tonumber(Config and Config.TargetHitRange) or 30
+    local maxCenterDistance = math.max(8, hitRange - 2)
+
+    -- If an unusually large model would push the missile beyond hit range,
+    -- favor server hit validation while still staying beyond the target hull.
+    local minimumOutside = targetHalfExtent + math.min(extraClearance, 2)
+    local distance = math.clamp(
+        requiredDistance,
+        minimumOutside,
+        math.max(minimumOutside, maxCenterDistance)
+    )
+
+    local teleportPosition =
+        boxCFrame.Position
+        + direction * distance
+
+    -- Aim at the vehicle center. The entire missile stays outside its bounds.
+    local aimPosition = boxCFrame.Position
+    local desiredFlightCFrame = CFrame.lookAt(
+        teleportPosition,
+        aimPosition
+    )
+
+    return desiredFlightCFrame, aimPosition, boxCFrame, boxSize
+end
+
+--==========================================================
+-- BEST VEHICLE TP FARM
+--==========================================================
+
+local function TeleportMissileToTarget(target)
+    if not IsTargetAlive(target) then
+        return false
+    end
+
+    local missile = GetLocalMissile()
+    if not missile then
+        return false
+    end
+
+    local desiredFlightCFrame, targetPosition =
+        GetOutsideTargetPlacement(target, missile)
+
+    if not desiredFlightCFrame or not targetPosition then
+        return false
+    end
+
+    local teleportPosition = desiredFlightCFrame.Position
+    local desiredRotation = desiredFlightCFrame.Rotation
+
+    -- Update MissileClient's real flight state first so the game cannot snap
+    -- the rocket back to its previous position on the next simulation frame.
+    local state = GetMissileClientState()
+    if state and state.Mode == "flight" and state.API then
+        if state.Missile and state.Missile.Parent then
+            missile = state.Missile
+
+            -- Recalculate once using the exact missile instance owned by
+            -- MissileClient, since different rocket models have different sizes.
+            local recalculated =
+                GetOutsideTargetPlacement(target, missile)
+
+            if recalculated then
+                desiredFlightCFrame = recalculated
+                teleportPosition = desiredFlightCFrame.Position
+                desiredRotation = desiredFlightCFrame.Rotation
+            end
+        end
+
+        pcall(function()
+            state.API.set(
+                teleportPosition,
+                Vector3.zero,
+                desiredRotation,
+                desiredRotation,
+                desiredRotation,
+                state.Fuel,
+                state.Yaw,
+                state.Pitch
+            )
+        end)
+    end
+
+    -- Move the COMPLETE missile model with the game's own rig function.
+    local moved = false
+
+    if missile:IsA("Model") then
+        if MissileRig and type(MissileRig.place) == "function" then
+            moved = pcall(function()
+                MissileRig.place(missile, desiredFlightCFrame)
+            end)
+        end
+
+        if not moved then
+            moved = pcall(function()
+                missile:PivotTo(desiredFlightCFrame)
+            end)
+        end
+
+        for _, descendant in ipairs(missile:GetDescendants()) do
+            if descendant:IsA("BasePart") then
+                pcall(function()
+                    descendant.AssemblyLinearVelocity = Vector3.zero
+                    descendant.AssemblyAngularVelocity = Vector3.zero
+                end)
+            end
+        end
+    elseif missile:IsA("BasePart") then
+        moved = pcall(function()
+            missile.AssemblyLinearVelocity = Vector3.zero
+            missile.AssemblyAngularVelocity = Vector3.zero
+            missile.CFrame = desiredFlightCFrame
+        end)
+    end
+
+    return moved
+end
+
+
+--==========================================================
+-- WORLD 1 END TP
+--==========================================================
+
+local function GetWorld1EndPad()
+    -- Best source: use the exact pad selected by Rocket Rush's Landing module.
+    if Landing and type(Landing.pad) == "function" then
+        local ok, pad = pcall(Landing.pad)
+        if ok and typeof(pad) == "Instance" and pad:IsA("BasePart") then
+            return pad
+        end
+    end
+
+    -- Fallback to the known World 1 end hierarchy from the place file:
+    -- workspace.RocketCourse.Obstacles["9_End"]
+    local rocketCourse = Workspace:FindFirstChild("RocketCourse")
+    local obstacles = rocketCourse and rocketCourse:FindFirstChild("Obstacles")
+    local endSection = obstacles and obstacles:FindFirstChild("9_End")
+
+    if not endSection then
+        return nil
+    end
+
+    local bestPart = nil
+    local bestScore = -math.huge
+
+    for _, object in ipairs(endSection:GetDescendants()) do
+        if object:IsA("BasePart") then
+            local lower = string.lower(object.Name)
+            local score = 0
+
+            -- Avoid choosing one of the decorative landing beacon lamps.
+            if object:FindFirstAncestor("LandingBeacons") then
+                score -= 1000
+            end
+
+            if string.find(lower, "landing") then
+                score += 220
+            end
+            if string.find(lower, "finish") then
+                score += 200
+            end
+            if string.find(lower, "end") then
+                score += 160
+            end
+            if string.find(lower, "pad") then
+                score += 260
+            end
+            if string.find(lower, "platform") then
+                score += 80
+            end
+
+            -- Prefer a broad landing surface over tiny decorative pieces.
+            local size = object.Size
+            score += math.min(size.X * size.Z, 2500) * 0.02
+            score += math.min(math.max(size.X, size.Y, size.Z), 200) * 0.03
+
+            if score > bestScore then
+                bestScore = score
+                bestPart = object
+            end
+        end
+    end
+
+    return bestPart
+end
+
+local function GetWorld1EndSurface()
+    -- Landing.surface() is exactly what MissileClient uses. It returns the
+    -- end-pad surface position and capture radius.
+    if Landing and type(Landing.surface) == "function" then
+        local ok, surfacePosition, radius = pcall(Landing.surface)
+        if ok and typeof(surfacePosition) == "Vector3" then
+            return surfacePosition, tonumber(radius) or 0, GetWorld1EndPad()
+        end
+    end
+
+    local pad = GetWorld1EndPad()
+    if not pad then
+        return nil, 0, nil
+    end
+
+    -- Generic fallback for normal horizontal pads.
+    local surfacePosition = pad.Position + Vector3.new(0, pad.Size.Y * 0.5, 0)
+    local radius = math.min(pad.Size.X, pad.Size.Z) * 0.5
+    return surfacePosition, radius, pad
+end
+
+local function GetWorld1PadTopSurface()
+    local surfacePosition, radius, pad = GetWorld1EndSurface()
+    if not surfacePosition then
+        return nil, 0, nil
+    end
+
+    -- Landing.surface() is the game's source of truth.  When a real pad part
+    -- is available, also raycast ONLY against that pad and use the higher of
+    -- the two Y values.  This guarantees we never calculate a point beneath
+    -- the landing geometry, even if the pad is rotated or its dimensions are
+    -- unusual.
+    if pad and pad:IsA("BasePart") then
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Include
+        params.FilterDescendantsInstances = {pad}
+        params.IgnoreWater = true
+
+        local origin = Vector3.new(
+            surfacePosition.X,
+            math.max(surfacePosition.Y, pad.Position.Y) + 150,
+            surfacePosition.Z
+        )
+
+        local result = Workspace:Raycast(
+            origin,
+            Vector3.new(0, -300, 0),
+            params
+        )
+
+        if result then
+            surfacePosition = Vector3.new(
+                surfacePosition.X,
+                math.max(surfacePosition.Y, result.Position.Y),
+                surfacePosition.Z
+            )
+        end
+    end
+
+    return surfacePosition, radius, pad
+end
+
+local function GetUprightHeading(pad)
+    -- LookVector is the missile's nose direction in MissileClient.  We force
+    -- it to +Y (straight into the sky).  This horizontal vector is only used
+    -- to stabilize roll around that vertical axis.
+    if pad then
+        local candidates = {
+            pad.CFrame.LookVector,
+            pad.CFrame.RightVector,
+            pad.CFrame.UpVector,
+        }
+
+        for _, candidate in ipairs(candidates) do
+            local flat = Vector3.new(candidate.X, 0, candidate.Z)
+            if flat.Magnitude > 0.05 then
+                return flat.Unit
+            end
+        end
+    end
+
+    return Vector3.new(0, 0, 1)
+end
+
+local function PlaceMissileUprightAtWorld1End(heightAbovePad, downwardSpeed)
+    if WorldConfig and type(WorldConfig.current) == "function" then
+        local ok, currentWorld = pcall(WorldConfig.current)
+        if ok and currentWorld ~= "World1" then
+            return false, "not_world1"
+        end
+    end
+
+    local missile = GetLocalMissile()
+    if not missile then
+        return false, "no_missile"
+    end
+
+    local state = GetMissileClientState()
+    if not state or state.Mode ~= "flight" then
+        return false, "not_flying"
+    end
+
+    if state.Missile and state.Missile.Parent then
+        missile = state.Missile
+    end
+
+    local surfacePosition, _, pad = GetWorld1PadTopSurface()
+    if not surfacePosition then
+        return false, "no_pad"
+    end
+
+    local tailLength = 3.5
+    if MissileRig and type(MissileRig.tailLength) == "function" then
+        local ok, result = pcall(MissileRig.tailLength, missile)
+        if ok and type(result) == "number" then
+            tailLength = result
+        end
+    end
+
+    -- Never allow the tail to be placed at or below the pad surface.
+    heightAbovePad = math.max(0.75, tonumber(heightAbovePad) or State.World1CaptureHeight)
+    downwardSpeed = math.clamp(tonumber(downwardSpeed) or 0, -7, 0)
+
+    local teleportPosition =
+        surfacePosition
+        + Vector3.new(0, tailLength + heightAbovePad, 0)
+
+    local desiredFlightCFrame = CFrame.lookAlong(
+        teleportPosition,
+        Vector3.new(0, 1, 0), -- NOSE STRAIGHT UP
+        GetUprightHeading(pad)
+    )
+
+    local desiredRotation = desiredFlightCFrame.Rotation
+    local desiredVelocity = Vector3.new(0, downwardSpeed, 0)
+
+    -- Write MissileClient's actual simulation state before drawing the model,
+    -- otherwise its next frame would restore the old position/orientation.
+    pcall(function()
+        state.API.set(
+            teleportPosition,
+            desiredVelocity,
+            desiredRotation,
+            desiredRotation,
+            desiredRotation,
+            state.Fuel,
+            state.Yaw,
+            state.Pitch
+        )
+    end)
+
+    local moved = false
+
+    if missile:IsA("Model") then
+        if MissileRig and type(MissileRig.place) == "function" then
+            moved = pcall(function()
+                MissileRig.place(missile, desiredFlightCFrame)
+            end)
+        end
+
+        if not moved then
+            moved = pcall(function()
+                missile:PivotTo(desiredFlightCFrame)
+            end)
+        end
+
+        for _, descendant in ipairs(missile:GetDescendants()) do
+            if descendant:IsA("BasePart") then
+                pcall(function()
+                    descendant.AssemblyLinearVelocity = desiredVelocity
+                    descendant.AssemblyAngularVelocity = Vector3.zero
+                end)
+            end
+        end
+    elseif missile:IsA("BasePart") then
+        moved = pcall(function()
+            missile.AssemblyLinearVelocity = desiredVelocity
+            missile.AssemblyAngularVelocity = Vector3.zero
+            missile.CFrame = desiredFlightCFrame
+        end)
+    end
+
+    return moved, moved and "ok" or "move_failed"
+end
+
+local function TeleportMissileToWorld1End()
+    -- Manual TP uses a safe, visibly-above-ground position first.  A short
+    -- delay then lowers the TAIL into the normal capture zone while keeping
+    -- the nose vertical.  It never places the tail below the pad surface.
+    local moved, reason = PlaceMissileUprightAtWorld1End(State.World1SafeHeight, 0)
+    if not moved then
+        if reason == "not_world1" then
+            warn("[Charles's Rocket Rush Tool] World 1 End TP only works in World 1.")
+        elseif reason == "not_flying" or reason == "no_missile" then
+            warn("[Charles's Rocket Rush Tool] Launch the rocket first.")
+        else
+            warn("[Charles's Rocket Rush Tool] Could not place the rocket at the World 1 end pad.")
+        end
+        return false
+    end
+
+    task.delay(0.30, function()
+        if State.Running then
+            PlaceMissileUprightAtWorld1End(State.World1CaptureHeight, -1.5)
+        end
+    end)
+
+    return true
+end
+
+local function ResetWorld1AutoComplete()
+    World1AutoPhase = "idle"
+    World1AutoPhaseSince = 0
+    World1LastLaunchAttempt = 0
+end
+
+local function FinishWorld1AutoComplete()
+    State.AutoCompleteWorld1 = false
+    ResetWorld1AutoComplete()
+
+    if World1AutoToggleControl then
+        pcall(function()
+            World1AutoToggleControl.Set(false)
+        end)
+    end
+
+    print("[Charles's Rocket Rush Tool] World 1 auto-complete finished.")
+end
+
+local function StepAutoCompleteWorld1()
+    if not State.AutoCompleteWorld1 then
+        ResetWorld1AutoComplete()
+        return
+    end
+
+    if WorldConfig and type(WorldConfig.current) == "function" then
+        local ok, currentWorld = pcall(WorldConfig.current)
+        if ok and currentWorld ~= "World1" then
+            warn("[Charles's Rocket Rush Tool] Auto Complete World 1 stopped: you are not in World 1.")
+            FinishWorld1AutoComplete()
+            return
+        end
+    end
+
+    local landingApproach = LocalPlayer:GetAttribute("LandingApproach")
+    local state = GetMissileClientState()
+
+    -- MissileClient changes its internal mode away from flight as soon as its
+    -- real landing capture succeeds.  LandingApproach='landed' is an even more
+    -- explicit success signal.
+    if landingApproach == "landed"
+        or (World1AutoPhase == "capture" and state and state.Mode ~= "flight") then
+        FinishWorld1AutoComplete()
+        return
+    end
+
+    if not state or state.Mode ~= "flight" then
+        local now = os.clock()
+        if now - World1LastLaunchAttempt >= 0.75 then
+            World1LastLaunchAttempt = now
+            TapKey(Enum.KeyCode.Space)
+        end
+        return
+    end
+
+    local now = os.clock()
+
+    if World1AutoPhase == "idle" then
+        World1AutoPhase = "safe"
+        World1AutoPhaseSince = now
+    end
+
+    if World1AutoPhase == "safe" then
+        -- Hold it well above the pad first so the rocket is never embedded in
+        -- terrain.  Nose points straight into the sky, matching your example.
+        PlaceMissileUprightAtWorld1End(State.World1SafeHeight, 0)
+
+        if now - World1AutoPhaseSince >= 0.35 then
+            World1AutoPhase = "capture"
+            World1AutoPhaseSince = now
+        end
+        return
+    end
+
+    if World1AutoPhase == "capture" then
+        -- The game's default landing CaptureHeight is 3 studs.  1.35 studs
+        -- keeps the tail safely ABOVE the pad while remaining in capture range.
+        PlaceMissileUprightAtWorld1End(State.World1CaptureHeight, -1.5)
+
+        -- If something interrupts landing, restage instead of ever pushing the
+        -- rocket farther into the floor.
+        if now - World1AutoPhaseSince >= 4 then
+            World1AutoPhase = "safe"
+            World1AutoPhaseSince = now
+        end
+    end
+end
+
+
+--==========================================================
+-- MILLION STUD CRASH FARM
+--==========================================================
+--
+-- Distance leaderboard:
+--   workspace leaderboard "Distance" -> LocalPlayer.TotalDistance
+--
+-- MissileClient displays run distance from horizontal launch/end displacement,
+-- so Y/altitude does not add distance.  This farm uses a CLIENT-SIDE wall at
+-- the destination and lets MissileClient collide with it normally.  That means
+-- the game itself enters its Explode path instead of us only changing a label.
+
+local function GetTotalDistance()
+    return math.max(0, tonumber(LocalPlayer:GetAttribute("TotalDistance")) or 0)
+end
+
+local function GetDistanceSinceEvolve()
+    return math.max(0, tonumber(LocalPlayer:GetAttribute("DistanceSinceEvolve")) or 0)
+end
+
+local function GetTotalMoves()
+    return math.max(0, tonumber(LocalPlayer:GetAttribute("TotalMoves")) or 0)
+end
+
+local function DestroyStudFarmWall()
+    if StudFarmWall then
+        pcall(function()
+            StudFarmWall:Destroy()
+        end)
+    end
+    StudFarmWall = nil
+end
+
+local function SetStudFarmPhase(phase)
+    StudFarmPhase = phase
+    StudFarmPhaseSince = os.clock()
+end
+
+local function ResetStudFarm(resetCounters)
+    DestroyStudFarmWall()
+
+    StudFarmPhase = "idle"
+    StudFarmPhaseSince = 0
+    StudFarmLastLaunchAttempt = 0
+    StudFarmLastRelaunchAttempt = 0
+    StudFarmRunStartTotal = GetTotalDistance()
+    StudFarmLaunchPosition = nil
+    StudFarmCrashAttempts = 0
+
+    if resetCounters then
+        StudFarmSessionStartTotal = GetTotalDistance()
+        StudFarmRuns = 0
+        StudFarmLastGain = 0
+    end
+end
+
+local function _StopStudFarm(reason)
+    State.StudFarm = false
+    ResetStudFarm(false)
+
+    if StudFarmToggleControl then
+        pcall(function()
+            StudFarmToggleControl.Set(false)
+        end)
+    end
+
+    if reason then
+        warn("[Charles's Rocket Rush Tool] Stud Farm stopped: " .. tostring(reason))
+    end
+end
+
+local function BuildStudFarmWall(position, direction)
+    DestroyStudFarmWall()
+
+    local wall = Instance.new("Part")
+    wall.Name = "Charles_StudFarm_CrashWall"
+    wall.Anchored = true
+    wall.CanCollide = true
+    wall.CanTouch = true
+    wall.CanQuery = true
+    wall.CastShadow = false
+    wall.Material = Enum.Material.Neon
+    wall.Transparency = 0.15
+    wall.Color = Color3.fromRGB(255, 80, 95)
+    wall.Size = Vector3.new(1200, 1200, 24)
+
+    -- Part Z is the thin axis.  Face the wall back toward the incoming rocket.
+    wall.CFrame = CFrame.lookAt(
+        position,
+        position - direction,
+        Vector3.new(0, 1, 0)
+    )
+
+    wall.Parent = Workspace
+    StudFarmWall = wall
+    return wall
+end
+
+local function StageMillionStudCrash(state)
+    if not state or state.Mode ~= "flight" or not state.API then
+        return false
+    end
+
+    local startPosition = StudFarmLaunchPosition or state.Position
+    if typeof(startPosition) ~= "Vector3" then
+        return false
+    end
+
+    local look = state.Rotation and state.Rotation.LookVector or Vector3.new(0, 0, -1)
+    local horizontal = Vector3.new(look.X, 0, look.Z)
+
+    if horizontal.Magnitude < 0.05 then
+        horizontal = Vector3.new(1, 0, 0)
+    else
+        horizontal = horizontal.Unit
+    end
+
+
+    local destination = Vector3.new(
+        startPosition.X,
+        startPosition.Y + State.StudFarmSafeAltitude,
+        startPosition.Z
+    ) + horizontal * State.StudFarmDistance
+
+    BuildStudFarmWall(destination, horizontal)
+
+    local missile = state.Missile or GetLocalMissile()
+    local missileHalf = GetMissileExtent(missile)
+    local gap = math.max(State.StudFarmWallGap, missileHalf + 18)
+    local stagePosition = destination - horizontal * gap
+    local rotation = CFrame.lookAt(stagePosition, destination, Vector3.new(0, 1, 0)).Rotation
+    local velocity = horizontal * State.StudFarmCrashSpeed
+
+    pcall(function()
+        state.API.set(
+            stagePosition,
+            velocity,
+            rotation,
+            rotation,
+            rotation,
+            state.Fuel,
+            state.Yaw,
+            state.Pitch
+        )
+    end)
+
+    if missile then
+        if missile:IsA("Model") then
+            if MissileRig and type(MissileRig.place) == "function" then
+                pcall(function()
+                    MissileRig.place(missile, CFrame.new(stagePosition) * rotation)
+                end)
+            else
+                pcall(function()
+                    missile:PivotTo(CFrame.new(stagePosition) * rotation)
+                end)
+            end
+        elseif missile:IsA("BasePart") then
+            pcall(function()
+                missile.CFrame = CFrame.new(stagePosition) * rotation
+                missile.AssemblyLinearVelocity = velocity
+            end)
+        end
+    end
+
+    return true
+end
+
+local function StartStudFarm()
+    State.AutoCompleteWorld1 = false
+    State.MoveFarm = false
+    ResetWorld1AutoComplete()
+    ResetMoveFarm(false)
+
+    if World1AutoToggleControl then
+        pcall(function()
+            World1AutoToggleControl.Set(false)
+        end)
+    end
+
+    if MoveFarmToggleControl then
+        pcall(function()
+            MoveFarmToggleControl.Set(false)
+        end)
+    end
+
+    ResetStudFarm(true)
+    SetStudFarmPhase("launch")
+
+    print(
+        "[Million Stud Farm] Started at TotalDistance",
+        math.floor(StudFarmSessionStartTotal),
+        "| requested crash distance",
+        math.floor(State.StudFarmDistance)
+    )
+end
+
+local function StepStudFarm()
+    if not State.StudFarm then
+        return
+    end
+
+    local now = os.clock()
+    local state = GetMissileClientState()
+    local mode = state and state.Mode or nil
+
+    if StudFarmPhase == "idle" then
+        SetStudFarmPhase("launch")
+    end
+
+    ------------------------------------------------------
+    -- LAUNCH A REAL RUN FIRST
+    ------------------------------------------------------
+
+    if StudFarmPhase == "launch" then
+        if state and mode == "flight" then
+            StudFarmRunStartTotal = GetTotalDistance()
+            StudFarmLaunchPosition = state.Position
+            StudFarmCrashAttempts = 0
+            SetStudFarmPhase("arm crash")
+            return
+        end
+
+        if now - StudFarmLastLaunchAttempt >= 0.75 then
+            StudFarmLastLaunchAttempt = now
+            TapKey(Enum.KeyCode.Space)
+        end
+
+        return
+    end
+
+    ------------------------------------------------------
+    -- TELEPORT ~1,000,000 STUDS AND AIM AT LOCAL WALL
+    ------------------------------------------------------
+
+    if StudFarmPhase == "arm crash" then
+        if not state or mode ~= "flight" then
+            SetStudFarmPhase("launch")
+            return
+        end
+
+        StudFarmCrashAttempts += 1
+
+        if StageMillionStudCrash(state) then
+            SetStudFarmPhase("hit wall")
+        end
+
+        return
+    end
+
+    ------------------------------------------------------
+    -- LET MISSILECLIENT RAYCAST INTO THE WALL
+    ------------------------------------------------------
+
+    if StudFarmPhase == "hit wall" then
+        if not state or mode ~= "flight" then
+            DestroyStudFarmWall()
+            SetStudFarmPhase("credit")
+            return
+        end
+
+        -- If the first approach somehow misses because of a frame hitch, put
+        -- the rocket immediately in front of the same wall and try again.
+        if now - StudFarmPhaseSince >= 1.25 then
+            if StudFarmCrashAttempts >= 3 then
+                warn("[Million Stud Farm] The local crash wall was not hit after 3 attempts; retrying a new run.")
+                DestroyStudFarmWall()
+                SetStudFarmPhase("relaunch")
+                return
+            end
+
+            SetStudFarmPhase("arm crash")
+        end
+
+        return
+    end
+
+    ------------------------------------------------------
+    -- ONLY CALL IT SUCCESSFUL IF SERVER TOTALDISTANCE MOVES
+    ------------------------------------------------------
+
+    if StudFarmPhase == "credit" then
+        local total = GetTotalDistance()
+
+        if total > StudFarmRunStartTotal then
+            StudFarmLastGain = total - StudFarmRunStartTotal
+            StudFarmRuns += 1
+
+            print(
+                string.format(
+                    "[Million Stud Farm] Run %d credited +%d studs | TotalDistance %d",
+                    StudFarmRuns,
+                    math.floor(StudFarmLastGain + 0.5),
+                    math.floor(total + 0.5)
+                )
+            )
+
+            SetStudFarmPhase("relaunch")
+            return
+        end
+
+        if now - StudFarmPhaseSince >= State.StudFarmCreditTimeout then
+            StudFarmLastGain = 0
+            warn(
+                "[Million Stud Farm] Server TotalDistance did not increase. The game may be clamping/rejecting that run distance; retrying."
+            )
+            SetStudFarmPhase("relaunch")
+        end
+
+        return
+    end
+
+    ------------------------------------------------------
+    -- RELAUNCH
+    ------------------------------------------------------
+
+    if StudFarmPhase == "relaunch" then
+        DestroyStudFarmWall()
+
+        if state and mode == "launch" then
+            SetStudFarmPhase("launch")
+            return
+        end
+
+        local unlockDelay = State.StudFarmRelaunchDelay
+
+        if Landing and type(Landing.get) == "function" then
+            local ok, result = pcall(Landing.get, "RelaunchUnlock")
+            if ok and type(result) == "number" then
+                unlockDelay = math.max(unlockDelay, result + 0.15)
+            end
+        end
+
+        if now - StudFarmPhaseSince >= unlockDelay
+            and now - StudFarmLastRelaunchAttempt >= 0.75 then
+
+            StudFarmLastRelaunchAttempt = now
+            TapKey(Enum.KeyCode.R)
+        end
+
+        return
+    end
+end
+
+--==========================================================
+-- MOVE FARM
+--==========================================================
+--
+-- The global leaderboard maps:
+--     Moves -> TotalMoves
+--
+-- MissileClient recognizes these actual rocket tricks:
+--     Backflip, Frontflip, Roll = BARREL ROLL, Spin = FLAT SPIN
+--
+-- Each completed trick also sends MissileEvent("QuestTrick"), which is the
+-- same path used by the normal client for trick quests / move progression.
+
+function ResetMoveFarm(resetCounters)
+    MoveFarmLastLaunchAttempt = 0
+    MoveFarmSafePosition = nil
+    MoveFarmAccumulated = 0
+    MoveFarmCycleIndex = 1
+    MoveFarmLastTotal = GetTotalMoves()
+
+    if resetCounters then
+        MoveFarmSessionStart = GetTotalMoves()
+        MoveFarmRecognized = 0
+    end
+end
+
+local function CurrentMoveFarmType()
+    if State.MoveFarmType ~= "Cycle" then
+        return State.MoveFarmType
+    end
+
+    return MoveFarmTypes[MoveFarmCycleIndex]
+end
+
+local function MoveDeltaCFrame(moveType, radians)
+    if moveType == "Backflip" then
+        return CFrame.Angles(radians, 0, 0)
+    elseif moveType == "Frontflip" then
+        return CFrame.Angles(-radians, 0, 0)
+    elseif moveType == "Barrel Roll" then
+        return CFrame.Angles(0, 0, radians)
+    else
+        -- Flat Spin
+        return CFrame.Angles(0, radians, 0)
+    end
+end
+
+local function StartMoveFarm()
+    State.StudFarm = false
+    State.AutoCompleteWorld1 = false
+    ResetStudFarm(false)
+    ResetWorld1AutoComplete()
+
+    if StudFarmToggleControl then
+        pcall(function()
+            StudFarmToggleControl.Set(false)
+        end)
+    end
+
+    if World1AutoToggleControl then
+        pcall(function()
+            World1AutoToggleControl.Set(false)
+        end)
+    end
+
+    ResetMoveFarm(true)
+
+    print(
+        "[Move Farm] Started. TotalMoves =",
+        math.floor(GetTotalMoves()),
+        "| mode =",
+        State.MoveFarmType
+    )
+end
+
+local function StepMoveFarm(dt)
+    if not State.MoveFarm then
+        return
+    end
+
+    local state = GetMissileClientState()
+    local now = os.clock()
+
+    if not state or state.Mode ~= "flight" then
+        MoveFarmSafePosition = nil
+
+        if now - MoveFarmLastLaunchAttempt >= 0.75 then
+            MoveFarmLastLaunchAttempt = now
+            TapKey(Enum.KeyCode.Space)
+        end
+
+        return
+    end
+
+    local missile = state.Missile or GetLocalMissile()
+
+    if not MoveFarmSafePosition then
+        MoveFarmSafePosition = state.Position + Vector3.new(0, State.MoveFarmSafeAltitude, 0)
+    end
+
+    local moveType = CurrentMoveFarmType()
+    local radians = math.rad(State.MoveFarmDegreesPerSecond) * math.max(dt, 1 / 240)
+    radians = math.clamp(radians, math.rad(1), math.rad(28))
+
+    local baseRotation = state.Rotation or CFrame.identity
+    local newRotation = baseRotation * MoveDeltaCFrame(moveType, radians)
+
+    pcall(function()
+        state.API.set(
+            MoveFarmSafePosition,
+            Vector3.zero,
+            newRotation,
+            newRotation,
+            newRotation,
+            state.Fuel,
+            state.Yaw,
+            state.Pitch
+        )
+    end)
+
+    if missile then
+        if missile:IsA("Model") then
+            if MissileRig and type(MissileRig.place) == "function" then
+                pcall(function()
+                    MissileRig.place(missile, CFrame.new(MoveFarmSafePosition) * newRotation)
+                end)
+            else
+                pcall(function()
+                    missile:PivotTo(CFrame.new(MoveFarmSafePosition) * newRotation)
+                end)
+            end
+        elseif missile:IsA("BasePart") then
+            pcall(function()
+                missile.CFrame = CFrame.new(MoveFarmSafePosition) * newRotation
+                missile.AssemblyLinearVelocity = Vector3.zero
+                missile.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+    end
+
+    MoveFarmAccumulated += math.abs(radians)
+
+    -- Swap tricks after a full visual revolution when Cycle is selected.
+    if MoveFarmAccumulated >= math.rad(360) then
+        MoveFarmAccumulated -= math.rad(360)
+
+        if State.MoveFarmType == "Cycle" then
+            MoveFarmCycleIndex += 1
+            if MoveFarmCycleIndex > #MoveFarmTypes then
+                MoveFarmCycleIndex = 1
+            end
+        end
+    end
+
+    local totalMoves = GetTotalMoves()
+    if totalMoves > MoveFarmLastTotal then
+        MoveFarmRecognized += totalMoves - MoveFarmLastTotal
+        MoveFarmLastTotal = totalMoves
+    elseif totalMoves < MoveFarmLastTotal then
+        MoveFarmLastTotal = totalMoves
+    end
+end
+
+
+local function FireTargetHit(target)
+    if not TargetHit or not IsTargetAlive(target) then
+        return false
+    end
+
+    local missileRoot = GetMissileRoot()
+    local referencePosition =
+        missileRoot and missileRoot.Position
+        or GetTargetPosition(target)
+
+    if not referencePosition then
+        return false
+    end
+
+    -- Send an actual point on the vehicle's bounding surface instead of its
+    -- center. With the rocket now sitting OUTSIDE the hull, this makes the hit
+    -- position correspond to the side of the vehicle facing the missile.
+    local hitPosition =
+        GetClosestPointOnTargetBounds(
+            target,
+            referencePosition
+        )
+
+    if not hitPosition then
+        return false
+    end
+
+    local ok = pcall(function()
+        TargetHit:FireServer(
+            target,
+            hitPosition,
+            nil,
+            0,
+            1,
+            "mini"
+        )
+    end)
+
+    return ok
+end
+
+local function ClearCurrentFarmTarget()
+    CurrentFarmTarget = nil
+    CurrentFarmTargetSince = 0
+end
+
+local function SelectBestFarmTarget()
+    if #TargetCache == 0 then
+        RebuildTargetCache()
+    end
+
+    local target = GetBestTarget()
+    CurrentFarmTarget = target
+    CurrentFarmTargetSince = os.clock()
+    return target
+end
+
+local function StepBestVehicleFarm()
+    if not State.AutoTargetFarm then
+        ClearCurrentFarmTarget()
+        return
+    end
+
+    -- Do not teleport the rocket while it is still sitting in the launcher.
+    -- Wait until MissileClient has entered its real "flight" state first.
+    -- This prevents launcher/rocket rig pieces from being separated.
+    local missileRoot = GetMissileRoot()
+    local flying = IsMissileFlying()
+
+    if not missileRoot or not flying then
+        if os.clock() - LastFarmTeleport > 0.8 then
+            LastFarmTeleport = os.clock()
+            TapKey(Enum.KeyCode.Space)
+        end
+        return
+    end
+
+    if not IsTargetAllowed(CurrentFarmTarget) then
+        SelectBestFarmTarget()
+    end
+
+    local target = CurrentFarmTarget
+    if not target then
+        RebuildTargetCache()
+        target = SelectBestFarmTarget()
+        if not target then
+            return
+        end
+    end
+
+    local now = os.clock()
+
+    -- If the server never marks the target destroyed, refresh selection after
+    -- a short timeout rather than getting permanently stuck on one vehicle.
+    if CurrentFarmTargetSince > 0
+        and now - CurrentFarmTargetSince >= State.FarmKillTimeout then
+
+        RebuildTargetCache()
+        target = SelectBestFarmTarget()
+        if not target then
+            return
+        end
+    end
+
+    -- Keep the missile close to the active best-value vehicle.
+    if now - LastFarmTeleport >= 0.08 then
+        LastFarmTeleport = now
+        TeleportMissileToTarget(target)
+    end
+
+    -- Hit it repeatedly until the server marks it destroyed.
+    if now - LastFarmHit >= State.FarmDelay then
+        LastFarmHit = now
+
+        for _ = 1, math.max(1, State.FarmRepeatHits) do
+            if not IsTargetAlive(target) then
+                break
+            end
+            FireTargetHit(target)
+        end
+    end
+
+    if not IsTargetAlive(target) then
+        RebuildTargetCache()
+        SelectBestFarmTarget()
+    end
+end
+
+--==========================================================
+-- AUTO PILOT
+--==========================================================
+
+local function StepAutoPilot()
+    if not State.AutoPilot or State.AutoTargetFarm then
+        return
+    end
+
+    local root = GetMissileRoot()
+    if not root then
+        return
+    end
+
+    local target = GetNearestTarget(root.Position)
+    if not target then
+        return
+    end
+
+    local targetPosition = GetTargetPosition(target)
+    if not targetPosition then
+        return
+    end
+
+    local difference = targetPosition - root.Position
+    if difference.Magnitude < 1 then
+        return
+    end
+
+    local direction = difference.Unit
+
+    pcall(function()
+        root.AssemblyLinearVelocity = direction * State.FlightSpeed
+        root.AssemblyAngularVelocity = Vector3.zero
+        root.CFrame = CFrame.lookAt(root.Position, targetPosition)
+    end)
+end
+
+--==========================================================
+-- UPGRADES / REWARDS
+--==========================================================
+
+local CoreUpgrades = {"Engine", "Fuel", "Handling", "Launch"}
+local Abilities = {"Grapple", "Parachute", "Shield", "Overdrive", "TimeWarp", "Rewind", "MiniRockets"}
+
+local function BuyList(list)
+    if not BuyUpgrade then
+        return
+    end
+
+    for _, upgrade in ipairs(list) do
+        pcall(function()
+            BuyUpgrade:FireServer(upgrade)
+        end)
+        task.wait(0.08)
+    end
+end
+
+local function CollectTableIDs(source)
+    local ids = {}
+    local seenTables = {}
+    local seenIDs = {}
+
+    local function Add(value)
+        if type(value) ~= "string" and type(value) ~= "number" then
+            return
+        end
+
+        local key = tostring(value)
+        if seenIDs[key] then
+            return
+        end
+
+        seenIDs[key] = true
+        table.insert(ids, value)
+    end
+
+    local function Scan(current, depth)
+        if type(current) ~= "table" or seenTables[current] or depth > 7 then
+            return
+        end
+
+        seenTables[current] = true
+
+        if current.id ~= nil then Add(current.id) end
+        if current.Id ~= nil then Add(current.Id) end
+        if current.ID ~= nil then Add(current.ID) end
+
+        for key, value in pairs(current) do
+            if type(value) == "table" then
+                if type(key) == "string" then
+                    if value.Goal ~= nil
+                        or value.goal ~= nil
+                        or value.Reward ~= nil
+                        or value.reward ~= nil
+                        or value.Description ~= nil
+                        or value.description ~= nil
+                        or value.Title ~= nil
+                        or value.title ~= nil then
+
+                        Add(key)
+                    end
+                end
+
+                Scan(value, depth + 1)
+            end
+        end
+    end
+
+    Scan(source, 0)
+    return ids
+end
+
+local function ClaimAllQuests()
+    if not ClaimQuest then return end
+
+    if not QuestData then
+        pcall(function()
+            local module = ReplicatedStorage:FindFirstChild("QuestData")
+            if module then QuestData = require(module) end
+        end)
+    end
+
+    if type(QuestData) ~= "table" then return end
+
+    for _, id in ipairs(CollectTableIDs(QuestData)) do
+        pcall(function()
+            ClaimQuest:FireServer(id)
+        end)
+        task.wait(0.05)
+    end
+end
+
+local function ClaimAllAchievements()
+    if not AchievementClaim then return end
+
+    if not AchievementConfig then
+        pcall(function()
+            local module = MissileGame:FindFirstChild("AchievementConfig")
+            if module then AchievementConfig = require(module) end
+        end)
+    end
+
+    if type(AchievementConfig) ~= "table" then return end
+
+    for _, id in ipairs(CollectTableIDs(AchievementConfig)) do
+        pcall(function()
+            AchievementClaim:FireServer(id)
+        end)
+        task.wait(0.05)
+    end
+end
+
+local function ClaimAllPlaytime()
+    if not PlaytimeClaim then return end
+
+    for index = 1, 7 do
+        pcall(function()
+            PlaytimeClaim:FireServer(index)
+        end)
+        task.wait(0.06)
+    end
+end
+
+--==========================================================
+-- EQUIPMENT
+--==========================================================
+
+local Rockets = {
+    "DefaultRocket",
+    "BlueRocket",
+    "FatRocket",
+    "StealthRocket",
+    "GroupRocket",
+    "TacticalMissile",
+    "Explorer",
+    "BlackWidow",
+    "TacticalDart",
+    "RedJavelin",
+    "MilitaryMissile",
+    "RedRush",
+    "Sidewinder",
+    "Vympel",
+    "NuclearRocket",
+}
+
+local EvolutionOrder = {
+    "DefaultRocket",
+    "FatRocket",
+    "TacticalMissile",
+    "Explorer",
+    "BlackWidow",
+    "TacticalDart",
+    "RedJavelin",
+    "MilitaryMissile",
+    "RedRush",
+    "Sidewinder",
+    "Vympel",
+}
+
+local Launchers = {
+    "MissileLauncher",
+    "CrystalLauncher",
+    "TacticalMK1Launcher",
+    "MilitaryLauncher",
+    "DemonLauncher",
+    "AdvancedMilitaryLauncher",
+    "RolandLauncher",
+    "NuclearLauncher",
+}
+
+local SelectedRocket = 1
+local SelectedLauncher = 1
+
+local function Owns(key)
+    if LocalPlayer:GetAttribute("Owned_" .. key) == true then return true end
+    if LocalPlayer:GetAttribute("Unlocked_" .. key) == true then return true end
+    if LocalPlayer:GetAttribute("Owns_" .. key) == true then return true end
+    if LocalPlayer:GetAttribute("OwnedLauncher_" .. key) == true then return true end
+    if LocalPlayer:GetAttribute("RocketType") == key then return true end
+    if LocalPlayer:GetAttribute("Launcher") == key then return true end
+    if LocalPlayer:GetAttribute("EquippedLauncher") == key then return true end
+    return key == "DefaultRocket" or key == "MissileLauncher"
+end
+
+local function EquipBest()
+    if EquipRocket then
+        for index = #EvolutionOrder, 1, -1 do
+            local rocket = EvolutionOrder[index]
+            if Owns(rocket) then
+                pcall(function()
+                    EquipRocket:FireServer(rocket)
+                end)
+                break
+            end
+        end
+    end
+
+    if EquipLauncher then
+        for index = #Launchers, 1, -1 do
+            local launcher = Launchers[index]
+            if Owns(launcher) then
+                pcall(function()
+                    EquipLauncher:FireServer(launcher)
+                end)
+                break
+            end
+        end
+    end
+end
+
+--==========================================================
+-- ESP
+--==========================================================
+
+local function RemoveESP(target)
+    local data = ESPObjects[target]
+    if data then
+        for _, object in pairs(data) do
+            pcall(function()
+                object:Destroy()
+            end)
+        end
+    end
+    ESPObjects[target] = nil
+end
+
+local function ClearESP()
+    for target in pairs(ESPObjects) do
+        RemoveESP(target)
+    end
+end
+
+local function AddESP(target)
+    if ESPObjects[target] then
+        return
+    end
+
+    local part = target.PrimaryPart or target:FindFirstChildWhichIsA("BasePart", true)
+    if not part then
+        return
+    end
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "_CharlesTargetESP"
+    highlight.Adornee = target
+    highlight.FillTransparency = 0.82
+    highlight.OutlineTransparency = 0
+    highlight.FillColor = Color3.fromRGB(255, 108, 68)
+    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = target
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "_CharlesTargetLabel"
+    billboard.Adornee = part
+    billboard.Size = UDim2.fromOffset(200, 48)
+    billboard.StudsOffset = Vector3.new(0, 5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = part
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 13
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextStrokeTransparency = 0.35
+    label.Parent = billboard
+
+    ESPObjects[target] = {
+        Highlight = highlight,
+        Billboard = billboard,
+        Label = label,
+    }
+end
+
+local function UpdateESP()
+    if not State.TargetESP then
+        ClearESP()
+        return
+    end
+
+    for _, target in ipairs(TargetCache) do
+        if IsTargetAllowed(target) then
+            AddESP(target)
+
+            local data = ESPObjects[target]
+            local position = GetTargetPosition(target)
+            local root = GetCharacterRoot()
+
+            if data and data.Label and position then
+                local distance = root and (root.Position - position).Magnitude or 0
+                local targetType = tostring(target:GetAttribute("TargetType") or target.Name)
+                local points = GetTargetPoints(target)
+
+                data.Label.Text = string.format(
+                    "%s  •  %d pts\n%d studs",
+                    targetType,
+                    points,
+                    math.floor(distance)
+                )
+            end
+        else
+            RemoveESP(target)
+        end
+    end
+
+    for target in pairs(ESPObjects) do
+        if not IsTargetAllowed(target) then
+            RemoveESP(target)
+        end
+    end
+end
+
+--==========================================================
+-- GUI THEME
+--==========================================================
+
+local Theme = {
+    Background = Color3.fromRGB(13, 15, 21),
+    Panel = Color3.fromRGB(20, 23, 31),
+    Panel2 = Color3.fromRGB(26, 30, 40),
+    Sidebar = Color3.fromRGB(16, 18, 25),
+    Accent = Color3.fromRGB(102, 118, 255),
+    Green = Color3.fromRGB(90, 222, 146),
+    Red = Color3.fromRGB(255, 89, 105),
+    Text = Color3.fromRGB(245, 246, 250),
+    TextDark = Color3.fromRGB(145, 151, 169),
+    Border = Color3.fromRGB(48, 53, 69),
+}
+
+--==========================================================
+-- GUI BASE
+--==========================================================
+
+local GUI = Instance.new("ScreenGui")
+GUI.Name = "CharlesRocketRush"
+GUI.ResetOnSpawn = false
+GUI.IgnoreGuiInset = false
+GUI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local GUIParent = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+
+if not GUIParent then
+    GUIParent = LocalPlayer:WaitForChild("PlayerGui", 10)
+end
+
+if not GUIParent then
+    -- Last-resort fallback. Normally Wave should always have PlayerGui.
+    GUIParent = CoreGui
+end
+
+GUI.DisplayOrder = 999999
+GUI.Enabled = true
+GUI.Parent = GUIParent
+print("[Charles's Rocket Rush Tool] ScreenGui parented to:", GUIParent:GetFullName())
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.fromOffset(790, 515)
+Main.Position = UDim2.new(0.5, -395, 0.5, -257)
+Main.BackgroundColor3 = Theme.Background
+Main.BorderSizePixel = 0
+Main.ClipsDescendants = true
+Main.Visible = true
+Main.Parent = GUI
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 14)
+MainCorner.Parent = Main
+
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = Theme.Border
+MainStroke.Transparency = 0.25
+MainStroke.Thickness = 1
+MainStroke.Parent = Main
+
+local Sidebar = Instance.new("Frame")
+Sidebar.Size = UDim2.new(0, 178, 1, 0)
+Sidebar.BackgroundColor3 = Theme.Sidebar
+Sidebar.BorderSizePixel = 0
+Sidebar.Parent = Main
+
+local SideLine = Instance.new("Frame")
+SideLine.AnchorPoint = Vector2.new(1, 0)
+SideLine.Position = UDim2.fromScale(1, 0)
+SideLine.Size = UDim2.new(0, 1, 1, 0)
+SideLine.BackgroundColor3 = Theme.Border
+SideLine.BorderSizePixel = 0
+SideLine.Parent = Sidebar
+
+local Brand = Instance.new("TextLabel")
+Brand.Position = UDim2.fromOffset(17, 17)
+Brand.Size = UDim2.new(1, -30, 0, 29)
+Brand.BackgroundTransparency = 1
+Brand.Font = Enum.Font.GothamBold
+Brand.Text = "CHARLES"
+Brand.TextSize = 21
+Brand.TextColor3 = Theme.Text
+Brand.TextXAlignment = Enum.TextXAlignment.Left
+Brand.Parent = Sidebar
+
+local BrandSub = Instance.new("TextLabel")
+BrandSub.Position = UDim2.fromOffset(18, 44)
+BrandSub.Size = UDim2.new(1, -30, 0, 18)
+BrandSub.BackgroundTransparency = 1
+BrandSub.Font = Enum.Font.Gotham
+BrandSub.Text = "ROCKET RUSH TOOL"
+BrandSub.TextSize = 10
+BrandSub.TextColor3 = Theme.Accent
+BrandSub.TextXAlignment = Enum.TextXAlignment.Left
+BrandSub.Parent = Sidebar
+
+local Top = Instance.new("Frame")
+Top.Position = UDim2.fromOffset(178, 0)
+Top.Size = UDim2.new(1, -178, 0, 65)
+Top.BackgroundColor3 = Theme.Panel
+Top.BorderSizePixel = 0
+Top.Parent = Main
+
+local PageTitle = Instance.new("TextLabel")
+PageTitle.Position = UDim2.fromOffset(20, 10)
+PageTitle.Size = UDim2.new(1, -100, 0, 28)
+PageTitle.BackgroundTransparency = 1
+PageTitle.Font = Enum.Font.GothamBold
+PageTitle.Text = "Dashboard"
+PageTitle.TextSize = 20
+PageTitle.TextColor3 = Theme.Text
+PageTitle.TextXAlignment = Enum.TextXAlignment.Left
+PageTitle.Parent = Top
+
+local PageDescription = Instance.new("TextLabel")
+PageDescription.Position = UDim2.fromOffset(21, 37)
+PageDescription.Size = UDim2.new(1, -100, 0, 18)
+PageDescription.BackgroundTransparency = 1
+PageDescription.Font = Enum.Font.Gotham
+PageDescription.Text = "Rocket Rush automation"
+PageDescription.TextSize = 11
+PageDescription.TextColor3 = Theme.TextDark
+PageDescription.TextXAlignment = Enum.TextXAlignment.Left
+PageDescription.Parent = Top
+
+local Close = Instance.new("TextButton")
+Close.AnchorPoint = Vector2.new(1, 0)
+Close.Position = UDim2.new(1, -16, 0, 16)
+Close.Size = UDim2.fromOffset(33, 33)
+Close.BackgroundColor3 = Theme.Panel2
+Close.Text = "×"
+Close.Font = Enum.Font.GothamBold
+Close.TextSize = 23
+Close.TextColor3 = Theme.TextDark
+Close.AutoButtonColor = false
+Close.Parent = Top
+
+local CloseCorner = Instance.new("UICorner")
+CloseCorner.CornerRadius = UDim.new(0, 8)
+CloseCorner.Parent = Close
+
+local Content = Instance.new("Frame")
+Content.Position = UDim2.fromOffset(178, 65)
+Content.Size = UDim2.new(1, -178, 1, -65)
+Content.BackgroundTransparency = 1
+Content.ClipsDescendants = true
+Content.Parent = Main
+
+--==========================================================
+-- DRAGGING
+--==========================================================
+
+local Dragging = false
+local DragStart
+local StartPosition
+
+Connect(Top.InputBegan, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        Dragging = true
+        DragStart = input.Position
+        StartPosition = Main.Position
+    end
+end)
+
+Connect(UserInputService.InputEnded, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        Dragging = false
+    end
+end)
+
+Connect(UserInputService.InputChanged, function(input)
+    if not Dragging or input.UserInputType ~= Enum.UserInputType.MouseMovement then
+        return
+    end
+
+    local delta = input.Position - DragStart
+    Main.Position = UDim2.new(
+        StartPosition.X.Scale,
+        StartPosition.X.Offset + delta.X,
+        StartPosition.Y.Scale,
+        StartPosition.Y.Offset + delta.Y
+    )
+end)
+
+--==========================================================
+-- GUI HELPERS
+--==========================================================
+
+local Pages = {}
+local TabButtons = {}
+
+local SidebarList = Instance.new("Frame")
+SidebarList.Position = UDim2.fromOffset(10, 82)
+SidebarList.Size = UDim2.new(1, -20, 1, -100)
+SidebarList.BackgroundTransparency = 1
+SidebarList.Parent = Sidebar
+
+local SidebarLayout = Instance.new("UIListLayout")
+SidebarLayout.Padding = UDim.new(0, 6)
+SidebarLayout.SortOrder = Enum.SortOrder.LayoutOrder
+SidebarLayout.Parent = SidebarList
+
+local function NewPage(name, description)
+    local page = Instance.new("ScrollingFrame")
+    page.Name = name
+    page.Size = UDim2.fromScale(1, 1)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0
+    page.ScrollBarThickness = 3
+    page.ScrollBarImageColor3 = Theme.Accent
+    page.CanvasSize = UDim2.new()
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.Visible = false
+    page.Parent = Content
+
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 16)
+    padding.PaddingBottom = UDim.new(0, 18)
+    padding.PaddingLeft = UDim.new(0, 17)
+    padding.PaddingRight = UDim.new(0, 17)
+    padding.Parent = page
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 12)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = page
+
+    Pages[name] = {
+        Frame = page,
+        Description = description,
+    }
+
+    return page
+end
+
+local function ShowPage(name)
+    for pageName, data in pairs(Pages) do
+        data.Frame.Visible = pageName == name
+    end
+
+    for pageName, button in pairs(TabButtons) do
+        local selected = pageName == name
+        TweenService:Create(button, TweenInfo.new(0.16), {
+            BackgroundTransparency = selected and 0 or 1,
+            TextColor3 = selected and Theme.Text or Theme.TextDark,
+        }):Play()
+    end
+
+    PageTitle.Text = name
+    if Pages[name] then
+        PageDescription.Text = Pages[name].Description
+    end
+end
+
+local function NewTab(name)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, 0, 0, 37)
+    button.BackgroundColor3 = Theme.Panel2
+    button.BackgroundTransparency = 1
+    button.AutoButtonColor = false
+    button.Text = "   " .. name
+    button.TextColor3 = Theme.TextDark
+    button.TextSize = 12
+    button.Font = Enum.Font.GothamMedium
+    button.TextXAlignment = Enum.TextXAlignment.Left
+    button.Parent = SidebarList
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = button
+
+    TabButtons[name] = button
+    Connect(button.MouseButton1Click, function()
+        ShowPage(name)
+    end)
+end
+
+local function Section(parent, title)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 0)
+    frame.AutomaticSize = Enum.AutomaticSize.Y
+    frame.BackgroundColor3 = Theme.Panel
+    frame.BorderSizePixel = 0
+    frame.Parent = parent
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = frame
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Theme.Border
+    stroke.Transparency = 0.45
+    stroke.Parent = frame
+
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 11)
+    padding.PaddingBottom = UDim.new(0, 11)
+    padding.PaddingLeft = UDim.new(0, 12)
+    padding.PaddingRight = UDim.new(0, 12)
+    padding.Parent = frame
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 7)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = frame
+
+    local header = Instance.new("TextLabel")
+    header.Size = UDim2.new(1, 0, 0, 24)
+    header.BackgroundTransparency = 1
+    header.Font = Enum.Font.GothamBold
+    header.Text = title
+    header.TextSize = 13
+    header.TextColor3 = Theme.Text
+    header.TextXAlignment = Enum.TextXAlignment.Left
+    header.Parent = frame
+
+    return frame
+end
+
+local function Toggle(parent, text, description, default, callback)
+    local enabled = default == true
+
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 53)
+    row.BackgroundColor3 = Theme.Panel2
+    row.BorderSizePixel = 0
+    row.Parent = parent
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = row
+
+    local title = Instance.new("TextLabel")
+    title.Position = UDim2.fromOffset(12, 7)
+    title.Size = UDim2.new(1, -75, 0, 19)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamMedium
+    title.Text = text
+    title.TextSize = 12
+    title.TextColor3 = Theme.Text
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = row
+
+    local desc = Instance.new("TextLabel")
+    desc.Position = UDim2.fromOffset(12, 27)
+    desc.Size = UDim2.new(1, -75, 0, 17)
+    desc.BackgroundTransparency = 1
+    desc.Font = Enum.Font.Gotham
+    desc.Text = description or ""
+    desc.TextSize = 10
+    desc.TextColor3 = Theme.TextDark
+    desc.TextXAlignment = Enum.TextXAlignment.Left
+    desc.Parent = row
+
+    local switch = Instance.new("TextButton")
+    switch.AnchorPoint = Vector2.new(1, 0.5)
+    switch.Position = UDim2.new(1, -12, 0.5, 0)
+    switch.Size = UDim2.fromOffset(42, 22)
+    switch.BackgroundColor3 = Theme.Border
+    switch.AutoButtonColor = false
+    switch.Text = ""
+    switch.Parent = row
+
+    local switchCorner = Instance.new("UICorner")
+    switchCorner.CornerRadius = UDim.new(1, 0)
+    switchCorner.Parent = switch
+
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.fromOffset(16, 16)
+    dot.Position = UDim2.fromOffset(3, 3)
+    dot.BackgroundColor3 = Theme.Text
+    dot.BorderSizePixel = 0
+    dot.Parent = switch
+
+    local dotCorner = Instance.new("UICorner")
+    dotCorner.CornerRadius = UDim.new(1, 0)
+    dotCorner.Parent = dot
+
+    local function Paint()
+        TweenService:Create(switch, TweenInfo.new(0.16), {
+            BackgroundColor3 = enabled and Theme.Accent or Theme.Border,
+        }):Play()
+
+        TweenService:Create(dot, TweenInfo.new(0.16), {
+            Position = enabled and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3),
+        }):Play()
+    end
+
+    local function Set(value)
+        enabled = value == true
+        Paint()
+        if callback then
+            task.spawn(callback, enabled)
+        end
+    end
+
+    Connect(switch.MouseButton1Click, function()
+        Set(not enabled)
+    end)
+
+    Paint()
+
+    return {
+        Set = Set,
+        Get = function() return enabled end,
+    }
+end
+
+local function Button(parent, text, callback)
+    local object = Instance.new("TextButton")
+    object.Size = UDim2.new(1, 0, 0, 38)
+    object.BackgroundColor3 = Theme.Panel2
+    object.AutoButtonColor = false
+    object.Text = text
+    object.TextSize = 11
+    object.Font = Enum.Font.GothamMedium
+    object.TextColor3 = Theme.Text
+    object.Parent = parent
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = object
+
+    Connect(object.MouseButton1Click, function()
+        TweenService:Create(object, TweenInfo.new(0.08), {
+            BackgroundColor3 = Theme.Accent,
+        }):Play()
+
+        task.delay(0.12, function()
+            if object.Parent then
+                TweenService:Create(object, TweenInfo.new(0.15), {
+                    BackgroundColor3 = Theme.Panel2,
+                }):Play()
+            end
+        end)
+
+        if callback then
+            task.spawn(callback)
+        end
+    end)
+
+    return object
+end
+
+local function Slider(parent, text, minimum, maximum, default, decimals, callback)
+    local value = default
+    local draggingSlider = false
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 60)
+    frame.BackgroundColor3 = Theme.Panel2
+    frame.BorderSizePixel = 0
+    frame.Parent = parent
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = frame
+
+    local title = Instance.new("TextLabel")
+    title.Position = UDim2.fromOffset(12, 8)
+    title.Size = UDim2.new(1, -90, 0, 18)
+    title.BackgroundTransparency = 1
+    title.Text = text
+    title.Font = Enum.Font.GothamMedium
+    title.TextSize = 11
+    title.TextColor3 = Theme.Text
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = frame
+
+    local valueLabel = Instance.new("TextLabel")
+    valueLabel.AnchorPoint = Vector2.new(1, 0)
+    valueLabel.Position = UDim2.new(1, -12, 0, 8)
+    valueLabel.Size = UDim2.fromOffset(70, 18)
+    valueLabel.BackgroundTransparency = 1
+    valueLabel.Font = Enum.Font.GothamBold
+    valueLabel.TextSize = 11
+    valueLabel.TextColor3 = Theme.Accent
+    valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+    valueLabel.Parent = frame
+
+    local bar = Instance.new("Frame")
+    bar.Position = UDim2.fromOffset(12, 40)
+    bar.Size = UDim2.new(1, -24, 0, 5)
+    bar.BackgroundColor3 = Theme.Border
+    bar.BorderSizePixel = 0
+    bar.Parent = frame
+
+    local barCorner = Instance.new("UICorner")
+    barCorner.CornerRadius = UDim.new(1, 0)
+    barCorner.Parent = bar
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.fromScale(0, 1)
+    fill.BackgroundColor3 = Theme.Accent
+    fill.BorderSizePixel = 0
+    fill.Parent = bar
+
+    local fillCorner = Instance.new("UICorner")
+    fillCorner.CornerRadius = UDim.new(1, 0)
+    fillCorner.Parent = fill
+
+    local function Round(number)
+        local power = 10 ^ decimals
+        return math.floor(number * power + 0.5) / power
+    end
+
+    local function Set(newValue)
+        newValue = math.clamp(newValue, minimum, maximum)
+        newValue = Round(newValue)
+        value = newValue
+
+        local alpha = (value - minimum) / (maximum - minimum)
+        fill.Size = UDim2.fromScale(alpha, 1)
+        valueLabel.Text = tostring(value)
+
+        if callback then
+            callback(value)
+        end
+    end
+
+    local function FromMouse()
+        local mouse = UserInputService:GetMouseLocation()
+        local alpha = (mouse.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X
+        alpha = math.clamp(alpha, 0, 1)
+        Set(minimum + (maximum - minimum) * alpha)
+    end
+
+    Connect(bar.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            draggingSlider = true
+            FromMouse()
+        end
+    end)
+
+    Connect(UserInputService.InputChanged, function(input)
+        if draggingSlider and input.UserInputType == Enum.UserInputType.MouseMovement then
+            FromMouse()
+        end
+    end)
+
+    Connect(UserInputService.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            draggingSlider = false
+        end
+    end)
+
+    Set(default)
+
+    return {
+        Set = Set,
+        Get = function() return value end,
+    }
+end
+
+local function ValueRow(parent, name, initial)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 34)
+    frame.BackgroundColor3 = Theme.Panel2
+    frame.BorderSizePixel = 0
+    frame.Parent = parent
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 7)
+    corner.Parent = frame
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Position = UDim2.fromOffset(11, 0)
+    nameLabel.Size = UDim2.new(0.5, -11, 1, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Font = Enum.Font.Gotham
+    nameLabel.Text = name
+    nameLabel.TextSize = 11
+    nameLabel.TextColor3 = Theme.TextDark
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.Parent = frame
+
+    local value = Instance.new("TextLabel")
+    value.AnchorPoint = Vector2.new(1, 0)
+    value.Position = UDim2.new(1, -11, 0, 0)
+    value.Size = UDim2.new(0.5, -11, 1, 0)
+    value.BackgroundTransparency = 1
+    value.Font = Enum.Font.GothamBold
+    value.Text = tostring(initial)
+    value.TextSize = 11
+    value.TextColor3 = Theme.Text
+    value.TextXAlignment = Enum.TextXAlignment.Right
+    value.Parent = frame
+
+    return value
+end
+
+local function Selector(parent, text, values, start, changed)
+    local index = start or 1
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 43)
+    frame.BackgroundColor3 = Theme.Panel2
+    frame.BorderSizePixel = 0
+    frame.Parent = parent
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = frame
+
+    local label = Instance.new("TextLabel")
+    label.Position = UDim2.fromOffset(12, 0)
+    label.Size = UDim2.new(0.42, -12, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamMedium
+    label.Text = text
+    label.TextSize = 11
+    label.TextColor3 = Theme.Text
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = frame
+
+    local cycle = Instance.new("TextButton")
+    cycle.AnchorPoint = Vector2.new(1, 0.5)
+    cycle.Position = UDim2.new(1, -8, 0.5, 0)
+    cycle.Size = UDim2.new(0.56, 0, 0, 29)
+    cycle.BackgroundColor3 = Theme.Background
+    cycle.AutoButtonColor = false
+    cycle.TextColor3 = Theme.Accent
+    cycle.Font = Enum.Font.GothamBold
+    cycle.TextSize = 10
+    cycle.Parent = frame
+
+    local cycleCorner = Instance.new("UICorner")
+    cycleCorner.CornerRadius = UDim.new(0, 7)
+    cycleCorner.Parent = cycle
+
+    local function Paint()
+        cycle.Text = "<  " .. tostring(values[index]) .. "  >"
+        if changed then
+            changed(values[index], index)
+        end
+    end
+
+    Connect(cycle.MouseButton1Click, function()
+        index += 1
+        if index > #values then
+            index = 1
+        end
+        Paint()
+    end)
+
+    Paint()
+    return cycle
+end
+
+--==========================================================
+-- PAGES
+--==========================================================
+
+local Dashboard = NewPage("Dashboard", "Live Rocket Rush information")
+local Farm = NewPage("Farm", "Best-value vehicle TP farming")
+local Moves = NewPage("Moves", "Automatic rocket trick / move farming")
+local Progression = NewPage("Progression", "Upgrades, evolves and rewards")
+local Rocket = NewPage("Rocket", "Flight and rocket modifiers")
+local Equipment = NewPage("Equipment", "Rocket and launcher selection")
+local Visuals = NewPage("Visuals", "Target visualization")
+local Settings = NewPage("Settings", "Interface and script controls")
+
+for _, name in ipairs({"Dashboard", "Farm", "Moves", "Progression", "Rocket", "Equipment", "Visuals", "Settings"}) do
+    NewTab(name)
+end
+
+--==========================================================
+-- DASHBOARD
+--==========================================================
+
+local StatusSection = Section(Dashboard, "PLAYER STATUS")
+local CoinsValue = ValueRow(StatusSection, "Coins", "0")
+local EvolvesValue = ValueRow(StatusSection, "Evolves", "0")
+local TotalDistanceValue = ValueRow(StatusSection, "Total Distance", "0")
+local TotalMovesValue = ValueRow(StatusSection, "Total Moves", "0")
+local EvolveDistanceValue = ValueRow(StatusSection, "Distance Since Evolve", "0")
+local RocketValue = ValueRow(StatusSection, "Rocket", "Unknown")
+local LauncherValue = ValueRow(StatusSection, "Launcher", "Unknown")
+local RunValue = ValueRow(StatusSection, "Flight State", "Idle")
+local TargetsValue = ValueRow(StatusSection, "Targets Detected", "0")
+local BestTargetValue = ValueRow(StatusSection, "Best Target", "None")
+local FarmTargetValue = ValueRow(StatusSection, "Farm Target", "None")
+
+local UpgradeSection = Section(Dashboard, "UPGRADE LEVELS")
+local EngineValue = ValueRow(UpgradeSection, "Engine", "0")
+local FuelValue = ValueRow(UpgradeSection, "Fuel", "0")
+local HandlingValue = ValueRow(UpgradeSection, "Handling", "0")
+local LaunchValue = ValueRow(UpgradeSection, "Launch", "0")
+
+--==========================================================
+-- FARM PAGE
+--==========================================================
+
+local TargetFarmSection = Section(Farm, "BEST VEHICLE TP FARM")
+
+Toggle(
+    TargetFarmSection,
+    "Auto Farm",
+    "Scans the full map, parks OUTSIDE the best live vehicle, then destroys it",
+    false,
+    function(value)
+        State.AutoTargetFarm = value
+        if not value then
+            ClearCurrentFarmTarget()
+        else
+            RebuildTargetCache()
+            SelectBestFarmTarget()
+        end
+    end
+)
+
+Slider(TargetFarmSection, "Hit Delay", 0.05, 0.75, 0.12, 2, function(value)
+    State.FarmDelay = value
+end)
+
+Slider(TargetFarmSection, "Outside Clearance", 1, 10, 4, 0, function(value)
+    State.FarmTeleportOffset = value
+end)
+
+Slider(TargetFarmSection, "Target Timeout", 0.5, 4, 1.25, 2, function(value)
+    State.FarmKillTimeout = value
+end)
+
+Slider(TargetFarmSection, "Hits Per Cycle", 1, 5, 2, 0, function(value)
+    State.FarmRepeatHits = value
+end)
+
+ValueRow(
+    TargetFarmSection,
+    "Target Scan",
+    "Entire Workspace"
+)
+
+Button(TargetFarmSection, "Full Map Target Scan", function()
+    local targets = RebuildTargetCache()
+    print(
+        "[Charles's Rocket Rush Tool] Full-map scan found",
+        #targets,
+        "target vehicles."
+    )
+end)
+
+Button(TargetFarmSection, "TP Outside Best Vehicle Now", function()
+    RebuildTargetCache()
+    local target = GetBestTarget()
+    if target then
+        TeleportMissileToTarget(target)
+    end
+end)
+
+local World1EndSection = Section(Farm, "WORLD 1 AUTO COMPLETE")
+
+ValueRow(
+    World1EndSection,
+    "Destination",
+    "World 1 Finish Pad"
+)
+
+ValueRow(
+    World1EndSection,
+    "Rocket Orientation",
+    "Nose Up / Sky"
+)
+
+World1AutoToggleControl = Toggle(
+    World1EndSection,
+    "Auto Complete World 1",
+    "Launches, moves above the finish pad upright, then lands automatically",
+    false,
+    function(value)
+        State.AutoCompleteWorld1 = value
+        ResetWorld1AutoComplete()
+
+        if value and State.StudFarm then
+            State.StudFarm = false
+            ResetStudFarm(false)
+
+            if StudFarmToggleControl then
+                pcall(function()
+                    StudFarmToggleControl.Set(false)
+                end)
+            end
+        end
+
+        if value and State.MoveFarm then
+            State.MoveFarm = false
+            ResetMoveFarm(false)
+
+            if MoveFarmToggleControl then
+                pcall(function()
+                    MoveFarmToggleControl.Set(false)
+                end)
+            end
+        end
+
+        -- World completion has movement priority while active, so the normal
+        -- vehicle farm/autopilot are temporarily suspended without changing
+        -- their GUI settings.
+    end
+)
+
+Slider(
+    World1EndSection,
+    "Safe Height Above Pad",
+    6,
+    25,
+    10,
+    1,
+    function(value)
+        State.World1SafeHeight = value
+    end
+)
+
+Slider(
+    World1EndSection,
+    "Final Tail Height",
+    0.75,
+    2.5,
+    1.35,
+    2,
+    function(value)
+        State.World1CaptureHeight = value
+        State.World1EndHeightOffset = value
+    end
+)
+
+Button(
+    World1EndSection,
+    "TP Upright To World 1 End",
+    function()
+        TeleportMissileToWorld1End()
+    end
+)
+
+local StudFarmSection = Section(Farm, "MILLION STUD CRASH FARM")
+
+ValueRow(
+    StudFarmSection,
+    "Leaderboard Stat",
+    "TotalDistance"
+)
+
+ValueRow(
+    StudFarmSection,
+    "Method",
+    "Teleport -> local wall -> Explode"
+)
+
+StudFarmStatusValue = ValueRow(
+    StudFarmSection,
+    "Status",
+    "Off"
+)
+
+StudFarmRunsValue = ValueRow(
+    StudFarmSection,
+    "Credited Runs",
+    "0"
+)
+
+StudFarmSessionValue = ValueRow(
+    StudFarmSection,
+    "Session Studs",
+    "0"
+)
+
+StudFarmToggleControl = Toggle(
+    StudFarmSection,
+    "Million Stud Farm",
+    "Launches, teleports ~1,000,000 horizontal studs away, then crashes into a local wall",
+    false,
+    function(value)
+        State.StudFarm = value
+
+        if value then
+            StartStudFarm()
+        else
+            ResetStudFarm(false)
+        end
+    end
+)
+
+Slider(
+    StudFarmSection,
+    "Crash Distance",
+    100000,
+    1000000,
+    1000000,
+    0,
+    function(value)
+        State.StudFarmDistance = value
+    end
+)
+
+Slider(
+    StudFarmSection,
+    "Wall Approach Gap",
+    25,
+    120,
+    55,
+    0,
+    function(value)
+        State.StudFarmWallGap = value
+    end
+)
+
+Slider(
+    StudFarmSection,
+    "Crash Speed",
+    1000,
+    8000,
+    4200,
+    0,
+    function(value)
+        State.StudFarmCrashSpeed = value
+    end
+)
+
+Slider(
+    StudFarmSection,
+    "Credit Timeout",
+    3,
+    15,
+    8,
+    1,
+    function(value)
+        State.StudFarmCreditTimeout = value
+    end
+)
+
+Button(
+    StudFarmSection,
+    "Reset Stud Session Counter",
+    function()
+        StudFarmSessionStartTotal = GetTotalDistance()
+        StudFarmRuns = 0
+        StudFarmLastGain = 0
+    end
+)
+
+local PrioritySection = Section(Farm, "PRIORITY")
+ValueRow(PrioritySection, "Helicopter", tostring(Config and Config.TargetTypes and Config.TargetTypes.Helicopter and Config.TargetTypes.Helicopter.Points or 40) .. " pts")
+ValueRow(PrioritySection, "AntiAir / Tunguska", tostring(Config and Config.TargetTypes and Config.TargetTypes.AntiAir and Config.TargetTypes.AntiAir.Points or 35) .. " pts")
+ValueRow(PrioritySection, "Tank", tostring(Config and Config.TargetTypes and Config.TargetTypes.Tank and Config.TargetTypes.Tank.Points or 25) .. " pts")
+
+local FilterSection = Section(Farm, "TARGET FILTER")
+Toggle(FilterSection, "Helicopters", "Allow helicopter targets", true, function(value)
+    State.Helicopter = value
+    ClearCurrentFarmTarget()
+end)
+Toggle(FilterSection, "Anti Air", "Allow anti-air / Tunguska targets", true, function(value)
+    State.AntiAir = value
+    ClearCurrentFarmTarget()
+end)
+Toggle(FilterSection, "Tanks", "Allow tank targets", true, function(value)
+    State.Tank = value
+    ClearCurrentFarmTarget()
+end)
+
+local FlightFarmSection = Section(Farm, "FLIGHT AUTOMATION")
+Toggle(FlightFarmSection, "Auto Launch", "Automatically launches when a rocket is ready", false, function(value)
+    State.AutoLaunch = value
+end)
+Toggle(FlightFarmSection, "Auto Boost", "Automatically holds the boost control", false, function(value)
+    State.AutoBoost = value
+    if not value and BoostHeld then
+        HoldKey(Enum.KeyCode.Space, false)
+        BoostHeld = false
+    end
+end)
+Toggle(FlightFarmSection, "Auto Pilot", "Normal nearest-target flight; disabled while TP Farm is active", false, function(value)
+    State.AutoPilot = value
+end)
+Toggle(FlightFarmSection, "Auto Mini Rockets", "Automatically activates Mini Rockets while flying", false, function(value)
+    State.AutoMiniRockets = value
+end)
+Slider(FlightFarmSection, "Auto Pilot Speed", 100, 1400, 450, 0, function(value)
+    State.FlightSpeed = value
+end)
+Button(FlightFarmSection, "Launch Now", function()
+    TapKey(Enum.KeyCode.Space)
+end)
+
+--==========================================================
+-- MOVES PAGE
+--==========================================================
+
+local MoveFarmSection = Section(Moves, "AUTO MOVE FARM")
+
+ValueRow(
+    MoveFarmSection,
+    "Leaderboard Stat",
+    "TotalMoves"
+)
+
+ValueRow(
+    MoveFarmSection,
+    "Recognized Moves",
+    "Backflip / Frontflip / Barrel Roll / Flat Spin"
+)
+
+MoveFarmStatusValue = ValueRow(
+    MoveFarmSection,
+    "Current Move",
+    "Off"
+)
+
+MoveFarmTotalValue = ValueRow(
+    MoveFarmSection,
+    "Total Moves",
+    tostring(math.floor(GetTotalMoves()))
+)
+
+MoveFarmSessionValue = ValueRow(
+    MoveFarmSection,
+    "Session Moves",
+    "0"
+)
+
+MoveFarmToggleControl = Toggle(
+    MoveFarmSection,
+    "Auto Move Farm",
+    "Keeps the rocket safely airborne and performs real trick rotations continuously",
+    false,
+    function(value)
+        State.MoveFarm = value
+
+        if value then
+            StartMoveFarm()
+        else
+            ResetMoveFarm(false)
+        end
+    end
+)
+
+Selector(
+    MoveFarmSection,
+    "Move Type",
+    {"Cycle", "Backflip", "Frontflip", "Barrel Roll", "Flat Spin"},
+    1,
+    function(value)
+        State.MoveFarmType = value
+        MoveFarmAccumulated = 0
+        MoveFarmCycleIndex = 1
+    end
+)
+
+Slider(
+    MoveFarmSection,
+    "Rotation Speed (deg/s)",
+    360,
+    1440,
+    720,
+    0,
+    function(value)
+        State.MoveFarmDegreesPerSecond = value
+    end
+)
+
+Slider(
+    MoveFarmSection,
+    "Safe Height",
+    250,
+    2000,
+    650,
+    0,
+    function(value)
+        State.MoveFarmSafeAltitude = value
+    end
+)
+
+Button(
+    MoveFarmSection,
+    "Reset Move Session Counter",
+    function()
+        MoveFarmSessionStart = GetTotalMoves()
+        MoveFarmRecognized = 0
+    end
+)
+
+local MoveInfoSection = Section(Moves, "HOW MOVES COUNT")
+ValueRow(MoveInfoSection, "Backflip", "Pitch +340°")
+ValueRow(MoveInfoSection, "Frontflip", "Pitch -340°")
+ValueRow(MoveInfoSection, "Barrel Roll", "Roll 340°")
+ValueRow(MoveInfoSection, "Flat Spin", "Yaw 340°")
+ValueRow(MoveInfoSection, "Reset Window", "0.9 seconds")
+
+--==========================================================
+-- PROGRESSION PAGE
+--==========================================================
+
+local AutoUpgradeSection = Section(Progression, "UPGRADES")
+Toggle(AutoUpgradeSection, "Auto Core Upgrades", "Engine, Fuel, Handling and Launch", false, function(value)
+    State.AutoCoreUpgrades = value
+end)
+Toggle(AutoUpgradeSection, "Auto Buy Abilities", "Buys available ability upgrades", false, function(value)
+    State.AutoAbilities = value
+end)
+Button(AutoUpgradeSection, "Buy Core Upgrades Once", function()
+    BuyList(CoreUpgrades)
+end)
+Button(AutoUpgradeSection, "Buy Abilities Once", function()
+    BuyList(Abilities)
+end)
+
+local EvolveSection = Section(Progression, "EVOLVE")
+Toggle(EvolveSection, "Auto Evolve", "Attempts evolve when requirements are complete", false, function(value)
+    State.AutoEvolve = value
+end)
+Button(EvolveSection, "Evolve Now", function()
+    if Evolve then Evolve:FireServer() end
+end)
+
+local RewardsSection = Section(Progression, "REWARDS")
+Toggle(RewardsSection, "Auto Claim Quests", "Claims completed quests", false, function(value)
+    State.AutoQuests = value
+end)
+Toggle(RewardsSection, "Auto Claim Achievements", "Claims completed achievements", false, function(value)
+    State.AutoAchievements = value
+end)
+Toggle(RewardsSection, "Auto Claim Playtime", "Claims ready playtime gifts", false, function(value)
+    State.AutoPlaytime = value
+end)
+Button(RewardsSection, "Claim Everything Now", function()
+    ClaimAllQuests()
+    task.wait(0.2)
+    ClaimAllAchievements()
+    task.wait(0.2)
+    ClaimAllPlaytime()
+end)
+
+--==========================================================
+-- ROCKET PAGE
+--==========================================================
+
+local FuelSection = Section(Rocket, "FUEL")
+Toggle(FuelSection, "Infinite Fuel", "Disables the client fuel limit", false, function(value)
+    State.InfiniteFuel = value
+    UpdateInfiniteFuel()
+end)
+
+local StatsSection = Section(Rocket, "FLIGHT MODIFIERS")
+Slider(StatsSection, "Speed Multiplier", 1, 6, 1, 1, function(value)
+    State.SpeedMultiplier = value
+end)
+Slider(StatsSection, "Handling Multiplier", 1, 6, 1, 1, function(value)
+    State.HandlingMultiplier = value
+end)
+Slider(StatsSection, "Launch Power", 1, 6, 1, 1, function(value)
+    State.LaunchMultiplier = value
+end)
+
+local RocketInfo = Section(Rocket, "ROCKET CONTROL")
+ValueRow(RocketInfo, "Modifiers", "Apply on next rocket setup")
+Button(RocketInfo, "Reset Rocket", function()
+    if MissileEvent then
+        pcall(function()
+            MissileEvent:FireServer("CourseReset", nil, 1)
+        end)
+    end
+end)
+
+--==========================================================
+-- EQUIPMENT PAGE
+--==========================================================
+
+local RocketEquipment = Section(Equipment, "ROCKET")
+Selector(RocketEquipment, "Selected Rocket", Rockets, 1, function(_, index)
+    SelectedRocket = index
+end)
+Button(RocketEquipment, "Equip Selected Rocket", function()
+    if EquipRocket then
+        EquipRocket:FireServer(Rockets[SelectedRocket])
+    end
+end)
+
+local LauncherEquipment = Section(Equipment, "LAUNCHER")
+Selector(LauncherEquipment, "Selected Launcher", Launchers, 1, function(_, index)
+    SelectedLauncher = index
+end)
+Button(LauncherEquipment, "Equip Selected Launcher", function()
+    if EquipLauncher then
+        EquipLauncher:FireServer(Launchers[SelectedLauncher])
+    end
+end)
+
+local BestEquipment = Section(Equipment, "AUTOMATIC EQUIPMENT")
+Toggle(BestEquipment, "Auto Equip Best", "Uses the highest owned rocket and launcher detected", false, function(value)
+    State.AutoEquipBest = value
+end)
+Button(BestEquipment, "Equip Best Owned", EquipBest)
+
+--==========================================================
+-- VISUALS PAGE
+--==========================================================
+
+local VisualSection = Section(Visuals, "TARGET ESP")
+Toggle(VisualSection, "Target ESP", "Shows vehicle type, points and distance", false, function(value)
+    State.TargetESP = value
+    if not value then
+        ClearESP()
+    end
+end)
+Button(VisualSection, "Refresh Targets", function()
+    RebuildTargetCache()
+    UpdateESP()
+end)
+
+--==========================================================
+-- SETTINGS PAGE
+--==========================================================
+
+local GUISection = Section(Settings, "INTERFACE")
+ValueRow(GUISection, "Toggle GUI", "Insert / Right Ctrl")
+Button(GUISection, "Hide GUI", function()
+    Main.Visible = false
+end)
+
+local ScriptSection = Section(Settings, "SCRIPT")
+
+--==========================================================
+-- DASHBOARD UPDATE
+--==========================================================
+
+local function NumberFormat(number)
+    number = tonumber(number) or 0
+    local text = tostring(math.floor(number))
+    return text:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+end
+
+local function DescribeTarget(target)
+    if not target or not target.Parent then
+        return "None"
+    end
+
+    local targetType = tostring(target:GetAttribute("TargetType") or target.Name)
+    return string.format("%s (%d pts)", targetType, GetTargetPoints(target))
+end
+
+local function UpdateDashboard()
+    CoinsValue.Text = NumberFormat(LocalPlayer:GetAttribute("Coins"))
+    EvolvesValue.Text = tostring(LocalPlayer:GetAttribute("Evolves") or 0)
+    TotalDistanceValue.Text = NumberFormat(GetTotalDistance())
+    TotalMovesValue.Text = NumberFormat(GetTotalMoves())
+    EvolveDistanceValue.Text = NumberFormat(GetDistanceSinceEvolve())
+    RocketValue.Text = tostring(LocalPlayer:GetAttribute("RocketType") or "Unknown")
+    LauncherValue.Text = tostring(
+        LocalPlayer:GetAttribute("Launcher")
+        or LocalPlayer:GetAttribute("EquippedLauncher")
+        or "Unknown"
+    )
+
+    if LocalPlayer:GetAttribute("InRace") == true then
+        RunValue.Text = "Race"
+    elseif LocalPlayer:GetAttribute("InRun") == true then
+        RunValue.Text = "Flying"
+    elseif GetLocalMissile() then
+        RunValue.Text = "Launcher"
+    else
+        RunValue.Text = "Idle"
+    end
+
+    TargetsValue.Text = tostring(#TargetCache)
+
+    local best = GetBestTarget()
+    BestTargetValue.Text = DescribeTarget(best)
+    FarmTargetValue.Text = State.AutoTargetFarm and DescribeTarget(CurrentFarmTarget) or "Off"
+
+    EngineValue.Text = tostring(LocalPlayer:GetAttribute("Upgrade_Engine") or 0)
+    FuelValue.Text = tostring(LocalPlayer:GetAttribute("Upgrade_Fuel") or 0)
+    HandlingValue.Text = tostring(LocalPlayer:GetAttribute("Upgrade_Handling") or 0)
+    LaunchValue.Text = tostring(LocalPlayer:GetAttribute("Upgrade_Launch") or 0)
+
+    if StudFarmStatusValue then
+        StudFarmStatusValue.Text = State.StudFarm and StudFarmPhase or "Off"
+    end
+
+    if StudFarmRunsValue then
+        StudFarmRunsValue.Text = tostring(StudFarmRuns)
+    end
+
+    if StudFarmSessionValue then
+        local sessionGain = math.max(0, GetTotalDistance() - StudFarmSessionStartTotal)
+        StudFarmSessionValue.Text = NumberFormat(sessionGain)
+    end
+
+    if MoveFarmStatusValue then
+        MoveFarmStatusValue.Text = State.MoveFarm and CurrentMoveFarmType() or "Off"
+    end
+
+    if MoveFarmTotalValue then
+        MoveFarmTotalValue.Text = NumberFormat(GetTotalMoves())
+    end
+
+    if MoveFarmSessionValue then
+        MoveFarmSessionValue.Text = NumberFormat(math.max(0, GetTotalMoves() - MoveFarmSessionStart))
+    end
+end
+
+--==========================================================
+-- UNLOAD
+--==========================================================
+
+local function Unload()
+    if not State.Running then
+        return
+    end
+
+    State.Running = false
+
+    if BoostHeld then
+        HoldKey(Enum.KeyCode.Space, false)
+        BoostHeld = false
+    end
+
+    ClearESP()
+    DestroyStudFarmWall()
+
+    if Config then
+        Config.UnlimitedFuel = OriginalUnlimitedFuel
+    end
+
+    if RocketStats then
+        if OriginalApplyUpgrades then
+            RocketStats.applyUpgrades = OriginalApplyUpgrades
+        end
+
+        if OriginalApplyLaunchUpgrade then
+            RocketStats.applyLaunchUpgrade = OriginalApplyLaunchUpgrade
+        end
+    end
+
+    for _, connection in ipairs(Connections) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+
+    table.clear(Connections)
+
+    pcall(function()
+        GUI:Destroy()
+    end)
+
+    getgenv().CharlesRocketRush = nil
+end
+
+Environment.Unload = Unload
+
+Button(ScriptSection, "Unload Charles's Rocket Rush Tool", Unload)
+Connect(Close.MouseButton1Click, Unload)
+
+--==========================================================
+-- GUI TOGGLE
+--==========================================================
+
+Connect(UserInputService.InputBegan, function(input, processed)
+    if processed then
+        return
+    end
+
+    if input.KeyCode == Enum.KeyCode.Insert or input.KeyCode == Enum.KeyCode.RightControl then
+        Main.Visible = not Main.Visible
+    end
+end)
+
+--==========================================================
+-- HEARTBEAT MOVEMENT
+--==========================================================
+
+Connect(RunService.Heartbeat, function(dt)
+    if not State.Running then
+        return
+    end
+
+    if State.StudFarm then
+        StepStudFarm()
+    elseif State.MoveFarm then
+        StepMoveFarm(dt)
+    elseif State.AutoCompleteWorld1 then
+        StepAutoCompleteWorld1()
+    elseif State.AutoTargetFarm then
+        StepBestVehicleFarm()
+    elseif State.AutoPilot then
+        StepAutoPilot()
+    end
+end)
+
+--==========================================================
+-- MAIN AUTOMATION LOOP
+--==========================================================
+
+task.spawn(function()
+    local LastTargetRefresh = 0
+    local LastLaunch = 0
+    local LastMini = 0
+    local LastCoreUpgrade = 0
+    local LastAbilityUpgrade = 0
+    local LastEvolve = 0
+    local LastQuest = 0
+    local LastAchievement = 0
+    local LastPlaytime = 0
+    local LastEquip = 0
+    local LastDashboard = 0
+    local LastESP = 0
+
+    while State.Running do
+        local now = os.clock()
+
+        if now - LastTargetRefresh >= 1.5 then
+            LastTargetRefresh = now
+            RebuildTargetCache()
+        end
+
+        if State.AutoLaunch
+            and not State.StudFarm
+            and not State.MoveFarm
+            and not State.AutoCompleteWorld1
+            and now - LastLaunch >= 1 then
+            local inRun = LocalPlayer:GetAttribute("InRun") == true
+            local missile = GetLocalMissile()
+
+            if missile and not inRun then
+                LastLaunch = now
+                TapKey(Enum.KeyCode.Space)
+            end
+        end
+
+        local flying = LocalPlayer:GetAttribute("InRun") == true
+
+        if State.AutoBoost
+            and flying
+            and not State.StudFarm
+            and not State.MoveFarm
+            and not State.AutoTargetFarm
+            and not State.AutoCompleteWorld1 then
+            if not BoostHeld then
+                HoldKey(Enum.KeyCode.Space, true)
+                BoostHeld = true
+            end
+        elseif BoostHeld then
+            HoldKey(Enum.KeyCode.Space, false)
+            BoostHeld = false
+        end
+
+        if State.AutoMiniRockets and flying and now - LastMini >= 0.8 then
+            LastMini = now
+
+            local key = Enum.KeyCode.G
+            if Config and typeof(Config.MiniRocketKey) == "EnumItem" then
+                key = Config.MiniRocketKey
+            end
+
+            TapKey(key)
+        end
+
+        if State.AutoCoreUpgrades and now - LastCoreUpgrade >= 1.5 then
+            LastCoreUpgrade = now
+            task.spawn(BuyList, CoreUpgrades)
+        end
+
+        if State.AutoAbilities and now - LastAbilityUpgrade >= 3 then
+            LastAbilityUpgrade = now
+            task.spawn(BuyList, Abilities)
+        end
+
+        if State.AutoEvolve and Evolve and now - LastEvolve >= 2.5 then
+            LastEvolve = now
+            pcall(function()
+                Evolve:FireServer()
+            end)
+        end
+
+        if State.AutoQuests and now - LastQuest >= 8 then
+            LastQuest = now
+            task.spawn(ClaimAllQuests)
+        end
+
+        if State.AutoAchievements and now - LastAchievement >= 10 then
+            LastAchievement = now
+            task.spawn(ClaimAllAchievements)
+        end
+
+        if State.AutoPlaytime and now - LastPlaytime >= 10 then
+            LastPlaytime = now
+            task.spawn(ClaimAllPlaytime)
+        end
+
+        if State.AutoEquipBest and now - LastEquip >= 10 then
+            LastEquip = now
+            task.spawn(EquipBest)
+        end
+
+        if now - LastDashboard >= 0.35 then
+            LastDashboard = now
+            UpdateDashboard()
+        end
+
+        if now - LastESP >= 0.35 then
+            LastESP = now
+            UpdateESP()
+        end
+
+        task.wait(0.03)
+    end
+end)
+
+--==========================================================
+-- START
+--==========================================================
+
+RebuildTargetCache()
+UpdateDashboard()
+ShowPage("Dashboard")
+
+print("[Charles's Rocket Rush Tool] Loaded.")
+print("[Auto Farm] Priority: highest Config.TargetTypes[*].Points first.")
+print("[Auto Farm] Target discovery: entire Workspace, including nested target models.")
+print("[Auto Farm] TP placement: outside each vehicle bounding box, inside TargetHitRange.")
+print("[Auto Farm] Current defaults: Helicopter 40 > AntiAir 35 > Tank 25.")
+print("[World 1 Auto Complete] Launches automatically, stages above the pad, then lands nose-up without entering the ground.")
+print("[GUI] Insert / Right Ctrl = toggle.")
+
+print("[Million Stud Farm] Distance leaderboard = TotalDistance; farm teleports ~1,000,000 studs and crashes into a local wall.")
+print("[Move Farm] Moves leaderboard = TotalMoves; recognized moves are Backflip, Frontflip, Barrel Roll, and Flat Spin.")
